@@ -35,6 +35,8 @@ If you use the code and/or data in this repository, we would appreciate if you c
           Rango, Marzia and
           Sievers, Niklas},
   journal={arXiv preprint arXiv:xxx},
+  url={osf.io/84jwv},
+  DOI={10.17605/OSF.IO/84JWV}
   year={2021},
 }
 ```
