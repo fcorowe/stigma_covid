@@ -1,0 +1,735 @@
+---
+title: "Twitter Data Analysis - VADER"
+author: "F Rowe"
+---
+
+```{r}
+rm(list=ls())
+```
+
+
+# 1. Library necessary packages
+```{r}
+library(rtweet)
+library(tidyverse)
+library(tidytext)
+library(textdata)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(countrycode)
+library(plyr)
+library(lubridate)
+library(ggplot2)
+library(RColorBrewer)
+library(gridExtra)
+library(sentimentr)
+library(ggthemes)
+library(showtext)
+library(wordcloud)
+library(vader)
+library(patchwork)
+library(viridis)
+library(scales)
+```
+
+Set font style
+```{r}
+# load font
+font_add_google("Roboto Condensed", "robotocondensed")
+# automatically use showtext to render text
+showtext_auto()
+```
+
+
+# 2. Data Wrangling
+```{r}
+# Read in tweets
+#tweets <- read_csv("../data/uk_tweets_01122019_01052020_VADER.csv")
+#glimpse(tweets)
+
+# Set rootpaths
+rp <- ' '
+dp <- 'data/tweet_data/'
+mp <- 'methods/'
+
+# Function to read in data
+read_in_csv <- function(x) {
+  x <- suppressWarnings(suppressMessages(read_csv(paste0(rp,dp,x))))
+  x$X1 <- NULL
+  return(x)
+}
+
+# Save tweets as csv
+uk_tweets    <- read_in_csv('tweets/uk_tweets_01122019_01052020_VLC.csv')
+usa_tweets   <- read_in_csv('tweets/usa_tweets_01122019_01052020_VLC.csv')
+spain_tweets <- read_in_csv('tweets/spain_tweets_01122019_01052020_VTLC.csv')
+italy_tweets <- read_in_csv('tweets/italy_tweets_01122019_01052020_VTLC.csv')
+grman_tweets <- read_in_csv('tweets/grman_tweets_01122019_01052020_VTLC.csv')
+```
+
+Formatting data
+```{r}
+# Function which creates a date variable, 
+# removes the index imported as part of the csv file and 
+# assigned a country id
+format_data <- function(x) {
+  
+  # Split string character date
+  date_df <- x$created_at %>% 
+    str_split(" ", simplify = TRUE) %>% 
+    as.data.frame()
+  
+  # Create date variable
+  x$date <- ymd(date_df$V1)
+  
+  # Remove original index and group column
+  x$X1          <- NULL
+  x$group_index <- NULL
+  
+  # Create hour variable
+  x$hour <- ymd_h(substr(x$created_at,1,13))
+  
+  # Determine country
+  cntry <- names(sort(table(x$country),decreasing=TRUE)[1])
+  
+  # Assign country id
+  if        (cntry == "United Kingdom") {
+    x$cntry_id <- 1
+  } else if (cntry == "United States") {
+    x$cntry_id <- 2
+  } else if (cntry == "Spain") {
+    x$cntry_id <- 3
+  } else if (cntry == "Italy") {
+    x$cntry_id <- 4
+  } else {            #Germany
+    x$cntry_id <- 5 
+  }
+  
+  # One tweet in the USA had a misallocated retweet count (was status_id). This was throwing errors, so is removed by this line
+  x <- subset(x,!is.na(suppressWarnings(as.integer(x$retweet_count))))
+  
+  
+  # Creating weightings variable, which accounts for retweets of certain tweets 
+  
+  # Default the weighting to 1
+  x$weightings <- 1
+  
+  x$rownames <- as.numeric(row.names(x))
+  
+  # Assign all retweets a weighting equivalent to their retweet count
+  nz_rts <- subset(x,x$retweet_count > 0)$rownames
+  x[x$rownames %in% nz_rts,'weightings'] <- x[x$rownames %in% nz_rts,'retweet_count']
+  
+  # Assign additional tweet to all original tweets with a retweet_count > 0
+  or_twt <- subset(x,x$retweet_count > 0 & is.na(x$retweeted_user))$rownames
+  x[x$rownames %in% or_twt,'weightings'] <- x[x$rownames %in% or_twt,'retweet_count'] + 1
+  
+  # Remove rownames
+  x$rownames <- NULL
+  
+  # Return results
+  return(x)
+  
+}
+
+# Format countries
+uk_tweets    <- format_data(uk_tweets)
+usa_tweets   <- format_data(usa_tweets)
+spain_tweets <- format_data(spain_tweets)
+italy_tweets <- format_data(italy_tweets)
+grman_tweets <- format_data(grman_tweets)
+```
+
+```{r}
+# Function to remove unwanted duplicated tweets
+rm_dupl_rt <- function(x) {
+  # Extract original status_ids from all retweets
+  rsid <- x$retweeted_user %>% 
+    sapply(function(x) regmatches(x,regexec("'status_id': \\s*(.*?)\\s*, 'u", x))[[1]][2] ) %>%
+    unname() %>% as.numeric()
+  # Create vector or status id's of tweets in dataset
+  sid <- x$status_id
+  # if statment conditional on whether a retweer and it's original are present in the data
+  if (length(which(rsid %in% sid)) > 0) { # If retweet and original are present
+    x <- x[!c(1:nrow(x)) %in% which(rsid %in% sid),] # Remove retweets where original tweet has already been captured
+    x <- x[is.na(x$retweeted_user) | !duplicated(x$retweeted_user),] # Remove duplicate retweets
+  } else { # If orignal and retweet have not been captured
+    x <- x[is.na(x$retweeted_user) | !duplicated(x$retweeted_user),] # Remove duplicate retweets
+  }
+  # Return results
+  return(x)
+}
+
+# Function to remove unwanted duplications in the data (e.g. retweets when the orginal has been captured)
+rm_unwanted_dupl <- function(x) {
+  # Find tweets with duplicate text
+  dpls <- x[duplicated(x$VADER_text) | duplicated(x$VADER_text, fromLast = TRUE),] 
+  # Split into individual dataframes
+  dpls_split <- dpls %>% split(.$VADER_text) 
+  # Remove unwanted duplicates
+  dpls_usrnm <- lapply(dpls_split, function(y) rm_dupl_rt(y) ) 
+  # rbind dataframes back together then subset original dpls to only include tweets to be removed
+  dpls <- dpls[!dpls$status_id %in% do.call(rbind,dpls_usrnm)$status_id,] 
+  # Removed these unwanted tweets from original dataframe
+  x <- x[!x$status_id %in% dpls$status_id,]
+  return(x)
+}
+
+# Remove unwanted duplicates from the data
+uk_tweets    <- rm_unwanted_dupl(uk_tweets)
+usa_tweets   <- rm_unwanted_dupl(usa_tweets)
+```
+
+
+## Select sample for this analysis
+```{r}
+#tweets <- tweets %>% dplyr::filter(between( date, as.Date("2020-05-01"), as.Date("2020-11-01") ) )
+```
+
+# 3. Sentiment Analysis
+
+## 3.1. Getting the scores
+
+```{r}
+# Function which gets vader sentiment and gives run-time
+get_vader_sent <- function(x) {
+  
+  # Start the clock
+  ptm <- proc.time()
+  
+  # Get vader sentiment of text
+  # If text has been translated, use translated text
+  if (suppressWarnings(length(x$translated_text) > 0)) {
+    sentiment <- vader_df(x$translated_text)
+  } else {
+    sentiment <- vader_df(x$VADER_text)
+  }
+  
+  # Stop the clock
+  ftm <- proc.time() - ptm
+  
+  # Print run-time
+  print(paste0('VADER sentiment obtained. Runtime (s): ', as.numeric(ftm[3])))
+  
+  # Return results
+  return(sentiment)
+
+}
+
+# Subset for second call of UK & USA tweets
+#uk_tweets_2  <- uk_tweets  %>% dplyr::filter(between( date, as.Date("2020-05-01"), as.Date("2020-11-01") ) )
+#usa_tweets_2 <- usa_tweets %>% dplyr::filter(between( date, as.Date("2020-05-01"), as.Date("2020-11-01") ) )
+
+# Call vader sentiment
+#uk_sent    <- get_vader_sent(uk_tweets)
+#uk_sent_2  <- get_vader_sent(uk_tweets_2)
+#usa_sent   <- get_vader_sent(usa_tweets)
+#usa_sent_2 <- get_vader_sent(usa_tweets_2)
+#spain_sent <- get_vader_sent(spain_tweets)
+#italy_sent <- get_vader_sent(italy_tweets)
+#grman_sent <- get_vader_sent(grman_tweets)
+```
+
+```{r}
+# Save sentiment scores
+#write.csv(uk_sent,    paste0(rp,dp,'vader_sentiments/uk_vader_sent_01122019_01052020.csv'))
+#write.csv(uk_sent_2,  paste0(rp,dp,'vader_sentiments/uk_vader_sent_01052020_01112020.csv'))
+#write.csv(usa_sent,   paste0(rp,dp,'vader_sentiments/usa_vader_sent_01122019_01052020.csv'))
+#write.csv(usa_sent_2, paste0(rp,dp,'vader_sentiments/usa_vader_sent_01052020_01122020.csv'))
+#write.csv(spain_sent, paste0(rp,dp,'vader_sentiments/spain_vader_sent_01122019_01052020.csv'))
+#write.csv(italy_sent, paste0(rp,dp,'vader_sentiments/italy_vader_sent_01122019_01052020.csv'))
+#write.csv(grman_sent, paste0(rp,dp,'vader_sentiments/grman_vader_sent_01122019_01052020.csv'))
+```
+
+```{r}
+# Read-in sentiment scores
+uk_sent    <- read_in_csv('vader_sentiments/uk_vader_sent_01122019_01052020.csv')
+#uk_sent_2  <- read_in_csv('vader_sentiments/uk_vader_sent_01052020_01112020.csv')
+#uk_sent    <- rbind(uk_sent, uk_sent_2)
+usa_sent   <- read_in_csv('vader_sentiments/usa_vader_sent_01122019_01052020.csv')
+#usa_sent_2 <- read_in_csv('vader_sentiments/usa_vader_sent_01052020_01112020.csv')
+#usa_sent   <- rbind(usa_sent, usa_sent_2)
+spain_sent <- read_in_csv('vader_sentiments/spain_vader_sent_01122019_01052020.csv')
+italy_sent <- read_in_csv('vader_sentiments/italy_vader_sent_01122019_01052020.csv')
+grman_sent <- read_in_csv('vader_sentiments/grman_vader_sent_01122019_01052020.csv')
+```
+
+
+
+Computing summary metrics
+```{r}
+# Function which combines key metrics about tweets and 
+summarise_data <- function(x,y) {
+  
+  # Join data
+  df <- cbind(x$date, y, x$retweet_count, x$retweeted_user, x$weightings, x$created_at, x$status_id)
+  
+  # Rename variables
+  df <- df %>% dplyr::rename(date = `x$date`,
+                             retweet_count = `x$retweet_count`,
+                             retweeted_user = `x$retweeted_user`,
+                             weightings = `x$weightings`,
+                             over_tweet_sent = compound,
+                             created_at = `x$created_at`,
+                             status_id = `x$status_id`)
+  
+  # Add variables that categories tweet sentiments
+  df <- df %>% 
+    mutate(pn_sent = 
+             case_when(
+               over_tweet_sent == 0 ~ 0,
+               over_tweet_sent > 0 ~ 1,
+               over_tweet_sent < 0 ~ 2
+               ), # ID for neutral, positive and negative sentiment
+           pn5c_sent =
+             case_when(
+               over_tweet_sent >= -.05 & over_tweet_sent <= .05 ~ 3,
+               over_tweet_sent < -.5 ~ 1,
+               over_tweet_sent < -.05 & over_tweet_sent >= -.5 ~ 2,
+               over_tweet_sent > .05 & over_tweet_sent <= .5 ~ 4,
+               over_tweet_sent > .5 ~ 5,
+               )
+           )
+} 
+
+# Compute summary metrics
+uk_summary    <- summarise_data(uk_tweets,uk_sent)
+usa_summary   <- summarise_data(usa_tweets,usa_sent)
+spain_summary <- summarise_data(spain_tweets,spain_sent)
+italy_summary <- summarise_data(italy_tweets,italy_sent)
+grman_summary <- summarise_data(grman_tweets,grman_sent)
+```
+
+
+```{r}
+# Check day-level sentiment scores
+check_day_sent <- function(x,y) {
+  
+  day_sent <- x %>% 
+    group_by(date) %>% 
+    dplyr::summarize(
+      wave_sent = weighted.mean(over_tweet_sent, retweet_count),
+      ave_sent = mean(over_tweet_sent)
+      )
+  
+  return(day_sent)
+}
+
+uk_day_sent    <- check_day_sent(uk_summary,uk_sent)
+usa_day_sent   <- check_day_sent(usa_summary,usa_sent)
+spain_day_sent <- check_day_sent(spain_summary,spain_sent)
+italy_day_sent <- check_day_sent(italy_summary,italy_sent)
+grman_day_sent <- check_day_sent(grman_summary,grman_sent)
+```
+
+```{r}
+# Remove Trump's tweets about banning US migration from the German dataset (as it is causing a massive amount of bias)
+trump_tweet <- grman_summary %>% 
+  filter(between(created_at, as.POSIXct("2020-04-21"), as.POSIXct("2020-04-22 00:00:00") )) %>% 
+  arrange(-weightings) %>% 
+  .[1,"status_id"]
+grman_summary <- grman_summary %>% filter(status_id != trump_tweet)
+```
+
+
+Expanding the dataset 
+```{r}
+# Function to expand the data (e.g. duplicate each tweet by it's number of retweets to account for )
+apply_weightings <- function (x) {
+  # Subset to only include necessary rows
+  x <- x[,c('date', 'text','over_tweet_sent','retweet_count', 'retweeted_user', 'weightings', 'pn_sent', 'pn5c_sent', 'status_id', 'created_at')]
+  # Create rownames variable (needed for ordering below)
+  x$rownames <- as.numeric(row.names(x))
+  # Duplicated each row by retweet count
+  y <- x[rep(row.names(x), x$retweet_count), ]
+  # Reintroduce tweets with no retweets (were duplicates 0 times by previous function - i.e. removed)
+  x <- rbind(y, subset(x, x$retweet_count == 0), subset(x,x$retweet_count > 0 & is.na(x$retweeted_user))) %>% .[order(.$rownames),]
+  x$rownames <- NULL
+  # Return results
+  return(x)
+}
+
+# Expand tweets
+uk_tweets_exp    <- apply_weightings(uk_summary)
+usa_tweets_exp   <- apply_weightings(usa_summary)
+spain_tweets_exp <- apply_weightings(spain_summary)
+italy_tweets_exp <- apply_weightings(italy_summary)
+grman_tweets_exp <- apply_weightings(grman_summary)
+```
+
+## 3.2 Total number of tweets
+```{r}
+nrow(uk_tweets_exp)  
+nrow(usa_tweets_exp)
+nrow(spain_tweets_exp) 
+nrow(italy_tweets_exp) 
+nrow(grman_tweets_exp)
+```
+
+
+
+## 3.3 Numbers by day
+```{r}
+twts_by_day <- function(df) {
+  df %>% group_by(date) %>% 
+  dplyr::summarise(tweets = n()) %>%
+  ggplot(., aes(x = date, y = tweets)) +
+  #geom_line() +
+  geom_smooth(method = "loess", se = FALSE, size=2, span = 0.15, color="#238A8DFF") +
+  theme_tufte()
+}
+
+twts_by_day(uk_tweets_exp)
+twts_by_day(usa_tweets_exp)
+twts_by_day(spain_tweets_exp)
+twts_by_day(italy_tweets_exp)
+twts_by_day(grman_tweets_exp)
+```
+
+## 3.4. Distribution
+
+Raw SS
+```{r}
+# Function to format y-axis
+ks <- function (x) { number_format(accuracy = 1,
+                                   scale = 1/1000,
+                                   suffix = "k",
+                                   big.mark = ",")(x) }
+
+# Function which plots the 
+plot_raw_ss <- function(df,title) {
+  ggplot(data=df) +
+    geom_histogram(aes(x = over_tweet_sent, 
+                       weight = weightings), 
+                   binwidth = 0.05,
+                   fill = "#440154FF",
+                   alpha = 1) +
+    #facet_grid(. ~ cntry_id) +
+    theme_tufte() + 
+    theme(text = element_text(family="robotocondensed",
+                              size = 20)) +
+    scale_y_continuous(labels = ks) +
+    labs(x= "Tweet sentiment score",
+       y = "Density") +
+    ggtitle(title)
+}
+
+grman_fd <- plot_raw_ss(grman_summary,'Germany\na.')
+italy_fd <- plot_raw_ss(italy_summary,'Italy\na.')
+spain_fd <- plot_raw_ss(spain_summary,'Spain\na.')
+uk_fd    <- plot_raw_ss(uk_summary,'United Kingdom\na.')
+usa_fd   <- plot_raw_ss(usa_summary,'United States\na.')
+```
+
+
+Cumulative Density of sentiment scores
+```{r}
+plot_sent_cd <- function(exp_df,title) {
+  ggplot(exp_df, aes(over_tweet_sent)) + 
+    stat_ecdf(geom = "step",
+              size = 1,
+              colour = "#440154FF") +
+    theme_tufte() + 
+    theme(text = element_text(family="robotocondensed",
+                              size = 20)) +
+    labs(x= "Tweet sentiment score",
+         y = "Cumulative density") +
+    ggtitle(title)
+}
+
+grman_cd <- plot_sent_cd(grman_tweets_exp,'\nb.')
+italy_cd <- plot_sent_cd(italy_tweets_exp,'\nb.')
+spain_cd <- plot_sent_cd(spain_tweets_exp,'\nb.')
+uk_cd    <- plot_sent_cd(uk_tweets_exp,'\nb.')
+usa_cd   <- plot_sent_cd(usa_tweets_exp,'\nb.')
+```
+
+
+Save plots
+```{r}
+png(paste0(rp,"outputs/oss_dist.png"), units="in", width=5, height=7, res=300)
+(grman_fd|grman_cd) / (italy_fd|italy_cd) / (spain_fd|spain_cd) / (uk_fd|uk_cd) / (usa_fd|usa_cd)
+dev.off()
+```
+
+
+Additional optional plots
+```{r}
+# Use histrogram plot to checking weights have been applied correctly
+check_weightings <- function(exp_df) {
+  ggplot(data=exp_df) +
+    geom_histogram(aes(x = over_tweet_sent), 
+                   binwidth = 0.05,
+                   fill = "#440154FF",
+                   alpha = 1) +
+    #facet_grid(. ~ cntry_id) +
+    theme_tufte() + 
+    theme(text = element_text(family="robotocondensed",
+                              size = 20)) +
+    labs(x= "Tweet sentiment score",
+         y = "Density")
+}
+
+check_weightings(uk_tweets_exp)
+
+
+# Frequency distribution of sentiment scores
+plot_sent_fd <- function(exp_df) {
+  ggplot(data=exp_df) +
+    geom_density(aes(x = over_tweet_sent), 
+                 fill = "blue",
+                 alpha = 0.6) +
+
+    #facet_grid(. ~ cntry_id) +
+    theme_tufte()
+}
+
+plot_sent_fd(uk_tweets_exp)
+plot_sent_fd(usa_tweets_exp)
+plot_sent_fd(spain_tweets_exp)
+plot_sent_fd(italy_tweets_exp)
+plot_sent_fd(grman_tweets_exp)
+```
+
+## 3.4. Frequencies
+
+Frequency Neu (0), Pos (1), Neg (2)
+```{r}
+freq_npn <- function(df) {
+  dplyr::count(x = df, pn_sent, wt = weightings)
+}
+
+freq_npn(uk_summary)
+```
+```{r}
+freq_npn(usa_summary)
+```
+```{r}
+freq_npn(spain_summary)
+```
+```{r}
+freq_npn(italy_summary)
+```
+```{r}
+freq_npn(grman_summary)
+```
+
+
+Totals - 5 categories Neu (3), S Neg (1), Neg (2), Pos (4), S Pos (5),
+```{r}
+freq_nnnpp <- function(df) {
+  dplyr::count(x = df, pn5c_sent, wt = weightings)
+}
+
+freq_nnnpp(uk_summary)
+```
+```{r}
+freq_nnnpp(usa_summary)
+```
+```{r}
+freq_nnnpp(spain_summary)
+```
+```{r}
+freq_nnnpp(italy_summary)
+```
+```{r}
+freq_nnnpp(grman_summary)
+```
+
+
+Summarise ERRORS in vader outputs
+```{r}
+find_vader_err <- function(x,y) {
+  cat(paste0(y, "\n",
+             'No. tweets with \'ERROR\' for word_scores: ', nrow(subset(x, x$word_scores == 'ERROR')), '.\n',
+             'No. tweets with \'NA\' pn_sent:            ', nrow(subset(x, is.na(x$pn_sent))), '.\n', 
+             'No. tweets with \'NA\' pn5c_sent:          ', nrow(subset(x, is.na(x$pn5c_sent))), '.\n\n' ))
+}
+
+find_vader_err(uk_summary, "UK")
+find_vader_err(usa_summary, "USA")
+find_vader_err(spain_summary, "Spain")
+find_vader_err(italy_summary, "Italy")
+find_vader_err(grman_summary, "Germany")
+```
+
+Daily Frequency Neu (0), Pos (1), Neg (2)
+```{r}
+tb_counts <- function(df){
+  df %>% dplyr::count(date, pn_sent, wt = weightings) %>% 
+  spread(pn_sent, n)
+} 
+
+uk_tb_counts    <- tb_counts(uk_summary)
+usa_tb_counts   <- tb_counts(usa_summary)
+spain_tb_counts <- tb_counts(spain_summary)
+italy_tb_counts <- tb_counts(italy_summary)
+grman_tb_counts <- tb_counts(grman_summary)
+
+uk_tb_counts
+usa_tb_counts
+spain_tb_counts
+italy_tb_counts
+grman_tb_counts
+```
+
+
+Daily Share Neu (0), Pos (1), Neg (2)
+```{r}
+tb_share <- function(x) { x[,2:4] / rowSums(x[,2:4]) * 100 }
+
+tb_share(uk_tb_counts)
+tb_share(usa_tb_counts)
+tb_share(spain_tb_counts)
+tb_share(italy_tb_counts)
+tb_share(grman_tb_counts)
+```
+
+Daily Frequency - 5 categories Neu (3), S Neg (1), Neg (2), Pos (4), S Pos (5)
+```{r, fig.width=14}
+tb_counts_5c <- function(df) {
+  df %>% dplyr::count(date, pn5c_sent, wt = weightings) %>% 
+    spread(pn5c_sent, n)
+}
+
+tb_share_5c <- function(df,title) {
+  cbind(df[,1], (df[,2:6] / rowSums(df[,2:6]) * 100)) %>% 
+    gather(stance, percent, -date)
+}
+
+#plot_share_5c <- function(df,title) {
+#  ggplot(df, aes(fill = stance, y=percent, x=date)) + 
+#    geom_bar(position="stack", stat="identity", show.legend = FALSE) + 
+#    theme_tufte() + 
+#    theme(text = element_text(family="robotocondensed",
+#                              size = 15)) +
+#    scale_fill_manual(values = c("darkred","#d7191c", "#f7f7f7", "#2c7bb6", "darkblue")) +
+#    labs(x= "Day",
+#         y = "Percent") +
+#    ggtitle(title)
+#}
+
+plot_share_5c <- function(df,title,lab="-",leg=FALSE) {
+  p <- ggplot(df, aes(fill = stance, y=percent, x=date)) + 
+    geom_bar(position="stack", stat="identity") + 
+    theme_tufte() + 
+    theme(text = element_text(family="robotocondensed",
+                              size = 50),
+          legend.position = "right") +
+    ggtitle(title)
+  
+  # Conditional labels
+  if (lab == "-") {
+    p <- p + labs(x = "", y = "")
+  } else if (lab == "y") {
+    p <- p + labs(x = "", y = "Percent")
+  } else if (lab == "x") {
+    p <- p + labs(x = "Day", y = "")
+  } else if (lab == "xy") {
+    p <- p + labs(x = "Day", y = "Percent")
+  } 
+  
+  # Conditional legend
+  if (leg == TRUE) {
+    p <- p + scale_fill_manual("", values = c("darkred","#d7191c", "#f7f7f7", "#2c7bb6", "darkblue"),
+                               labels = c("Strongly Negative", "Negative", "Neutral", "Positive", "Strongly Positive"))
+  } else {
+    p <- p + scale_fill_manual("", values = c("darkred","#d7191c", "#f7f7f7", "#2c7bb6", "darkblue"),
+                               labels = c("Strongly Negative", "Negative", "Neutral", "Positive", "Strongly Positive")) +
+             theme(legend.position = "none")
+  }
+}
+
+grman_share_5c <- grman_summary %>% tb_counts_5c() %>% tb_share_5c() %>% plot_share_5c('b.',lab="y")
+italy_share_5c <- italy_summary %>% tb_counts_5c() %>% tb_share_5c() %>% plot_share_5c('b.')
+spain_share_5c <- spain_summary %>% tb_counts_5c() %>% tb_share_5c() %>% plot_share_5c('b.',lab="x")
+uk_share_5c    <- uk_summary    %>% tb_counts_5c() %>% tb_share_5c() %>% plot_share_5c('b.',lab="xy")
+usa_share_5c   <- usa_summary   %>% tb_counts_5c() %>% tb_share_5c() %>% plot_share_5c('b.',lab="x")
+```
+
+
+## 3.5 Tweet level analysis
+
+SS Daily evolution - smoothed conditional mean
+
+```{r}
+daily_sent_plot <- function(df,title,lab="-") {
+  p <- ggplot(df, aes(x = created_at, y = over_tweet_sent)) +
+    #geom_point(colour = "gray", alpha = 0.3, size = 1, shape=".") + 
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red", size = .3) +
+    geom_smooth(aes(weight = weightings), method = "loess", se = FALSE, level = 0.5, size=1, span = 0.3, color="#440154FF") +
+    theme_tufte() + 
+    theme(text = element_text(family="robotocondensed", size = 50)) +
+    scale_y_continuous(limits = c(-1,1)) +
+    ggtitle(title)
+  
+  # Conditional labels
+  if (lab == "-") {
+    p <- p + labs(x = "", y = "")
+  } else if (lab == "y") {
+    p <- p + labs(x = "", y = "Tweet sentiment score")
+  } else if (lab == "x") {
+    p <- p + labs(x = "Day", y = "")
+  } else if (lab == "xy") {
+    p <- p + labs(x = "Day", y = "Tweet sentiment score")
+  } 
+  
+  
+}
+
+uk_daily_sent_plot    <- daily_sent_plot(uk_summary,   'United Kingdom\na.',lab="y")
+usa_daily_sent_plot   <- daily_sent_plot(usa_summary,  'United States\na.')
+spain_daily_sent_plot <- daily_sent_plot(spain_summary,'Spain\na.')
+italy_daily_sent_plot <- daily_sent_plot(italy_summary,'Italy\na.')
+grman_daily_sent_plot <- daily_sent_plot(grman_summary,'Germany\na.',lab="y")
+```
+
+
+```{r}
+# PLot results
+png(paste0(rp,"outputs/oss_points_all.png"), units="in", width=16, height=12, res=300)
+( (grman_daily_sent_plot / grman_share_5c) | (italy_daily_sent_plot / italy_share_5c) | (spain_daily_sent_plot / spain_share_5c) ) / ( (uk_daily_sent_plot    / uk_share_5c) | (usa_daily_sent_plot   / usa_share_5c) | plot_spacer() )
+dev.off()
+```
+
+
+```{r}
+# Plot individual graphs, then arrange externally
+
+png(paste0(rp,"outputs/oss_points_uk.png"), units="in", width=5.3, height=6, res=300)
+uk_daily_sent_plot / uk_share_5c + plot_layout(widths = c(1, 1))
+dev.off()
+
+png(paste0(rp,"outputs/oss_points_usa.png"), units="in", width=5.3, height=6, res=300)
+usa_daily_sent_plot / usa_share_5c + plot_layout(widths = c(1, 1))
+dev.off()
+
+png(paste0(rp,"outputs/oss_points_spain.png"), units="in", width=5.3, height=6, res=300)
+spain_daily_sent_plot / spain_share_5c + plot_layout(widths = c(1, 1))
+dev.off()
+
+png(paste0(rp,"outputs/oss_points_italy.png"), units="in", width=5.3, height=6, res=300)
+italy_daily_sent_plot / italy_share_5c + plot_layout(widths = c(1, 1))
+dev.off()
+
+png(paste0(rp,"outputs/oss_points_grman.png"), units="in", width=5.3, height=6, res=300)
+grman_daily_sent_plot / grman_share_5c + plot_layout(widths = c(1, 1))
+dev.off()
+```
+
+
+## Code for selecting colour pallettes
+```{r}
+# Hexadecimal color specification 
+brewer.pal(n = 12, name = "Reds")
+```
+
+```{r}
+# View a single RColorBrewer palette by specifying its name
+display.brewer.pal(n = 12, name = 'Reds')
+```
+
+```{r, fig.height=7}
+display.brewer.all()
+```

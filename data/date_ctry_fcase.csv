@@ -1,0 +1,233 @@
+Date,rank,ctry_nm
+1 December,1,China
+13 January,2,Thailand
+16 January,3,Japan
+20 January,4,South Korea
+20 January,4,United States
+21 January,5,Taiwan[a]
+22 January,6,Hong Kong[b]
+22 January,6,Macau[b]
+23 January,7,Singapore
+23 January,7,Vietnam
+24 January,8,France
+24 January,8,Nepal
+25 January,9,Australia
+25 January,9,Canada
+25 January,9,Malaysia
+27 January,10,Cambodia
+27 January,10,Germany
+27 January,10,Sri Lanka
+29 January,11,Finland
+29 January,11,United Arab Emirates
+30 January,12,India
+30 January,12,Italy
+30 January,12,Philippines
+31 January,13,Russia
+31 January,13,Spain
+31 January,13,Sweden
+31 January,13,United Kingdom
+4 February,14,Belgium
+14 February,15,Egypt
+19 February,16,Iran
+21 February,17,Israel
+21 February,17,Lebanon
+24 February,18,Afghanistan
+24 February,18,Bahrain
+24 February,18,Iraq
+24 February,18,Kuwait
+24 February,18,Oman
+25 February,19,Algeria
+25 February,19,Austria
+25 February,19,Brazil
+25 February,19,Croatia
+25 February,19,Switzerland
+26 February,20,Georgia
+26 February,20,Greece
+26 February,20,North Macedonia
+26 February,20,Norway
+26 February,20,Pakistan
+26 February,20,Romania
+27 February,21,Denmark
+27 February,21,Estonia
+27 February,21,Netherlands
+27 February,21,Nigeria
+27 February,21,San Marino
+28 February,22,Azerbaijan
+28 February,22,Belarus
+28 February,22,Iceland
+28 February,22,Lithuania
+28 February,22,Mexico
+28 February,22,Monaco
+28 February,22,New Zealand
+29 February,23,Ecuador
+29 February,23,Ireland
+29 February,23,Luxembourg
+29 February,23,Qatar
+1 March,24,Armenia
+1 March,24,Czech Republic
+1 March,24,Dominican Republic
+1 March,24,Kurdistan[a]
+1 March,24,Saint Barthélemy[c]
+1 March,24,Saint Martin[c]
+2 March,25,Andorra
+2 March,25,Indonesia
+2 March,25,Jordan
+2 March,25,Latvia
+2 March,25,Morocco
+2 March,25,Portugal
+2 March,25,Saudi Arabia
+2 March,25,Senegal
+2 March,25,Tunisia
+3 March,26,Argentina
+3 March,26,Chile
+3 March,26,Gibraltar[d]
+3 March,26,Liechtenstein
+3 March,26,Ukraine
+4 March,27,Faroe Islands[e]
+4 March,27,French Guiana[f]
+4 March,27,Hungary
+4 March,27,Poland
+4 March,27,Slovenia
+5 March,28,Bosnia and Herzegovina
+5 March,28,Martinique[f]
+5 March,28,Palestine
+5 March,28,South Africa
+6 March,29,Bhutan
+6 March,29,Cameroon
+6 March,29,Colombia
+6 March,29,Costa Rica
+6 March,29,Peru
+6 March,29,Serbia
+6 March,29,Slovakia
+6 March,29,Togo
+6 March,29,Vatican City
+7 March,30,Maldives
+7 March,30,Malta
+7 March,30,Moldova
+7 March,30,Paraguay
+8 March,31,Albania
+8 March,31,Bangladesh
+8 March,31,Bulgaria
+9 March,32,Brunei
+9 March,32,Cyprus
+9 March,32,Guernsey[g]
+9 March,32,Panama
+10 March,33,Bolivia
+10 March,33,Burkina Faso
+10 March,33,DR Congo
+10 March,33,Jamaica
+10 March,33,Jersey[g]
+10 March,33,Mongolia
+10 March,33,Northern Cyprus[a]
+10 March,33,Turkey
+11 March,34,Cuba
+11 March,34,French Polynesia[c]
+11 March,34,Guyana
+11 March,34,Honduras
+11 March,34,Ivory Coast
+11 March,34,Réunion[f]
+12 March,35,Saint Vincent and the Grenadines
+12 March,35,Trinidad and Tobago
+13 March,36,Antigua and Barbuda
+13 March,36,Aruba[h]
+13 March,36,Cayman Islands[d]
+13 March,36,Curaçao[h]
+13 March,36,Ethiopia
+13 March,36,Gabon
+13 March,36,Ghana
+13 March,36,Guadeloupe[f]
+13 March,36,Guatemala
+13 March,36,Guinea
+13 March,36,Kazakhstan
+13 March,36,Kenya
+13 March,36,Kosovo[a]
+13 March,36,Puerto Rico[i]
+13 March,36,Saint Lucia
+13 March,36,Sudan
+13 March,36,Suriname
+13 March,36,U.S. Virgin Islands[i]
+13 March,36,Uruguay
+13 March,36,Venezuela
+14 March,37,Central African Republic
+14 March,37,Congo
+14 March,37,Equatorial Guinea
+14 March,37,Eswatini
+14 March,37,Mauritania
+14 March,37,Mayotte[f]
+14 March,37,Namibia
+14 March,37,Rwanda
+14 March,37,Seychelles
+15 March,38,Akrotiri and Dhekelia[d]
+15 March,38,Bahamas
+15 March,38,Guam[i]
+15 March,38,Uzbekistan
+16 March,39,Benin
+16 March,39,Greenland[e]
+16 March,39,Liberia
+16 March,39,Somalia
+16 March,39,Tanzania
+17 March,40,Barbados
+17 March,40,Gambia
+17 March,40,Montenegro
+17 March,40,Sint Maarten[h]
+18 March,41,Bermuda[d]
+18 March,41,Djibouti
+18 March,41,El Salvador
+18 March,41,Kyrgyzstan
+18 March,41,Mauritius
+18 March,41,Montserrat[d]
+18 March,41,New Caledonia[j]
+18 March,41,Nicaragua
+18 March,41,Zambia
+19 March,42,Angola
+19 March,42,Chad
+19 March,42,Fiji
+19 March,42,Haiti
+19 March,42,Isle of Man[g]
+19 March,42,Niger
+20 March,43,Cape Verde
+20 March,43,East Timor
+20 March,43,Madagascar
+20 March,43,Papua New Guinea
+20 March,43,Uganda
+20 March,43,Zimbabwe
+21 March,44,Eritrea
+21 March,44,Transnistria[k]
+22 March,45,Åland Islands[l]
+22 March,45,Dominica
+22 March,45,Grenada
+22 March,45,Mozambique
+22 March,45,Syria
+23 March,46,Belize
+23 March,46,Myanmar
+23 March,46,Turks and Caicos Islands[d]
+24 March,47,Laos
+24 March,47,Libya
+25 March,48,British Virgin Islands[d]
+25 March,48,Guinea-Bissau
+25 March,48,Mali
+25 March,48,Saint Kitts and Nevis
+26 March,49,Anguilla[d]
+28 March,50,Northern Mariana Islands[i]
+30 March,51,Botswana
+31 March,52,Burundi
+31 March,52,Donetsk People's Republic[m]
+31 March,52,Luhansk People's Republic[m]
+31 March,52,Sierra Leone
+31 March,52,Sint Eustatius[n]
+31 March,52,Somaliland[o]
+2 April,53,Malawi
+3 April,54,Falkland Islands[d][p]
+4 April,55,Western Sahara[p][q]
+5 April,56,Saint Pierre and Miquelon[c]
+5 April,56,South Sudan
+6 April,57,São Tomé and Príncipe
+7 April,58,Abkhazia[a]
+7 April,58,Artsakh[k]
+10 April,59,Yemen
+11 April,60,Saba[n]
+16 April,61,Bonaire[n]
+30 April,62,Comoros
+30 April,62,Tajikistan
+6 May,63,South Ossetia[a]
+13 May,64,Lesotho

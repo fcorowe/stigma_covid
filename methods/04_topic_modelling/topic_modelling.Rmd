@@ -1,0 +1,1144 @@
+---
+title: "Topic Modelling"
+author: "M Mahony"
+---
+
+```{r}
+rm(list=ls())
+```
+
+
+# Purpose: Classify tweets identified as misinformation to describe 'types of misinformation tweets'.
+```{r}
+# Libraries
+# Data manipulation
+library(dplyr)
+library(tm)
+library(quanteda)
+library(tidytext)
+library(tidyr)
+library(stringr)
+library(lubridate)
+library(stringr)
+library(data.table)
+# Visualisation
+library(ggplot2)
+library(ggrepel)
+library(ggthemes)
+library(showtext)
+library(RColorBrewer)
+library(pals)
+library(patchwork)
+library(viridis)
+library(scales)
+# Analysis
+library(topicmodels)
+library(ldatuning)
+library(readr)
+```
+
+
+Set font style
+```{r}
+# load font
+font_add_google("Roboto Condensed", "robotocondensed")
+# automatically use showtext to render text
+showtext_auto()
+```
+
+# Data wrangling
+```{r}
+# Set rootpaths
+rp <- ' '
+dp <- 'data/tweet_data/'
+mp <- 'methods/'
+
+# Function to read in data
+read_in_csv <- function(x) {
+  x <- suppressWarnings(suppressMessages(read_csv(paste0(rp,dp,x))))
+  x$X1 <- NULL
+  return(x)
+}
+
+# Read in tweets
+uk_tweets    <- read_in_csv('tweets/uk_tweets_01122019_01052020_VLC.csv')
+usa_tweets   <- read_in_csv('tweets/usa_tweets_01122019_01052020_VLC.csv')
+spain_tweets <- read_in_csv('tweets/spain_tweets_01122019_01052020_VTLC.csv')
+italy_tweets <- read_in_csv('tweets/italy_tweets_01122019_01052020_VTLC.csv')
+grman_tweets <- read_in_csv('tweets/grman_tweets_01122019_01052020_VTLC.csv')
+```
+
+Formatting data
+```{r}
+# Function to remove unwanted duplicated tweets
+rm_dupl_rt <- function(x) {
+  # Extract original status_ids from all retweets
+  rsid <- x$retweeted_user %>% 
+    sapply(function(x) regmatches(x,regexec("'status_id': \\s*(.*?)\\s*, 'u", x))[[1]][2] ) %>%
+    unname() %>% as.numeric()
+  # Create vector or status id's of tweets in dataset
+  sid <- x$status_id
+  # if statment conditional on whether a retweer and it's original are present in the data
+  if (length(which(rsid %in% sid)) > 0) { # If retweet and original are present
+    x <- x[!c(1:nrow(x)) %in% which(rsid %in% sid),] # Remove retweets where original tweet has already been captured
+    x <- x[is.na(x$retweeted_user) | !duplicated(x$retweeted_user),] # Remove duplicate retweets
+  } else { # If orignal and retweet have not been captured
+    x <- x[is.na(x$retweeted_user) | !duplicated(x$retweeted_user),] # Remove duplicate retweets
+  }
+  # Return results
+  return(x)
+}
+
+# Function to remove unwanted duplications in the data (e.g. retweets when the orginal has been captured)
+rm_unwanted_dupl <- function(x) {
+  # Find tweets with duplicate text
+  dpls <- x[duplicated(x$VADER_text) | duplicated(x$VADER_text, fromLast = TRUE),] 
+  # Split into individual dataframes
+  dpls_split <- dpls %>% split(.$VADER_text) 
+  # Remove unwanted duplicates
+  dpls_usrnm <- lapply(dpls_split, function(y) rm_dupl_rt(y) ) 
+  # rbind dataframes back together then subset original dpls to only include tweets to be removed
+  dpls <- dpls[!dpls$status_id %in% do.call(rbind,dpls_usrnm)$status_id,] 
+  # Removed these unwanted tweets from original dataframe
+  x <- x[!x$status_id %in% dpls$status_id,]
+  return(x)
+}
+
+# Remove unwanted duplicates from the data
+uk_tweets    <- rm_unwanted_dupl(uk_tweets)
+usa_tweets   <- rm_unwanted_dupl(usa_tweets)
+```
+
+
+```{r}
+# Function which creates a date variable, 
+# removes the index imported as part of the csv file and 
+# assigned a country id
+format_data <- function(x) {
+  
+  # Split string character date
+  date_df <- x$created_at %>% 
+    str_split(" ", simplify = TRUE) %>% 
+    as.data.frame()
+  
+  # Create date variable
+  x$date <- ymd(date_df$V1)
+  
+  # Remove original index and group column
+  x$X1          <- NULL
+  x$group_index <- NULL
+  
+  # Determine country
+  cntry <- names(sort(table(x$country),decreasing=TRUE)[1])
+  
+  # Assign country id
+  if        (cntry == "United Kingdom") {
+    x$cntry_id <- 1
+  } else if (cntry == "United States") {
+    x$cntry_id <- 2
+  } else if (cntry == "Spain") {
+    x$cntry_id <- 3
+  } else if (cntry == "Italy") {
+    x$cntry_id <- 4
+  } else {            #Germany
+    x$cntry_id <- 5 
+  }
+  
+  if ('translated_text' %in% colnames(x)) {
+    names(x)[names(x) == "translated_text"] <- "sentiment_text"
+  } else {
+    names(x)[names(x) == "VADER_text"] <- "sentiment_text"
+  }
+  
+  # One tweet in the USA had a misallocated retweet count (was status_id). This was throwing errors, so is removed by this line
+  x <- subset(x,!is.na(suppressWarnings(as.integer(x$retweet_count))))
+  
+  # Creating weightings variable, which accounts for retweets of certain tweets 
+  
+  # Default the weighting to 1
+  x$weightings <- 1
+  
+  x$rownames <- as.numeric(row.names(x))
+  
+  # Assign all retweets a weighting equivalent to their retweet count
+  nz_rts <- subset(x,x$retweet_count > 0)$rownames
+  x[x$rownames %in% nz_rts,'weightings'] <- x[x$rownames %in% nz_rts,'retweet_count']
+  
+  # Assign additional tweet to all original tweets with a retweet_count > 0
+  or_twt <- subset(x,x$retweet_count > 0 & is.na(x$retweeted_user))$rownames
+  x[x$rownames %in% or_twt,'weightings'] <- x[x$rownames %in% or_twt,'retweet_count'] + 1
+  
+  # Remove rownames
+  x$rownames <- NULL
+  
+  # Return results
+  return(x)
+  
+}
+
+# Format countries
+uk_tweets    <- format_data(uk_tweets)
+usa_tweets   <- format_data(usa_tweets)
+spain_tweets <- format_data(spain_tweets)
+italy_tweets <- format_data(italy_tweets)
+grman_tweets <- format_data(grman_tweets)
+```
+
+```{r}
+# Read-in sentiment scores
+uk_sent    <- read_in_csv('vader_sentiments/uk_vader_sent_01122019_01052020.csv')
+#uk_sent_2  <- read_in_csv('vader_sentiments/uk_vader_sent_01052020_01112020.csv')
+#uk_sent    <- rbind(uk_sent, uk_sent_2)
+usa_sent   <- read_in_csv('vader_sentiments/usa_vader_sent_01122019_01052020.csv')
+#usa_sent_2 <- read_in_csv('vader_sentiments/usa_vader_sent_01052020_01112020.csv')
+#usa_sent   <- rbind(usa_sent, usa_sent_2)
+spain_sent <- read_in_csv('vader_sentiments/spain_vader_sent_01122019_01052020.csv')
+italy_sent <- read_in_csv('vader_sentiments/italy_vader_sent_01122019_01052020.csv')
+grman_sent <- read_in_csv('vader_sentiments/grman_vader_sent_01122019_01052020.csv')
+```
+
+```{r}
+# Function which assigns sentiment scores to tweets 
+summarise_data <- function(x,y) {
+  
+  # Rename 'text' column in tweet data. Appears to interfere with objects in the functions used
+  names(x)[names(x) == "text"] <- "original_text"
+  
+  # Join data
+  df <- cbind(x$date, y, x$created_at, x$status_id, x$weightings, x$cntry_id, x$lexicon_text, x$sentiment_text)
+  
+  # Rename variables
+  df <- df %>% dplyr::rename(date = `x$date`,
+                             over_tweet_sent = compound,
+                             created_at = `x$created_at`,
+                             status_id = `x$status_id`,
+                             weightings = `x$weightings`,
+                             cntry_id = `x$cntry_id`,
+                             lexicon_text = `x$lexicon_text`,
+                             sentiment_text = `x$sentiment_text`)
+  
+  # Add variables that categories tweet sentiments
+  df <- df %>% 
+    mutate(pn_sent = 
+             case_when(
+               over_tweet_sent == 0 ~ 0,
+               over_tweet_sent > 0 ~ 1,
+               over_tweet_sent < 0 ~ 2
+               ), # ID for neutral, positive and negative sentiment
+           pn5c_sent =
+             case_when(
+               over_tweet_sent >= -.05 & over_tweet_sent <= .05 ~ 3,
+               over_tweet_sent < -.5 ~ 1,
+               over_tweet_sent < -.05 & over_tweet_sent >= -.5 ~ 2,
+               over_tweet_sent > .05 & over_tweet_sent <= .5 ~ 4,
+               over_tweet_sent > .5 ~ 5,
+               )
+           )
+} 
+
+# Compute summary metrics
+uk_tweets    <- summarise_data(uk_tweets,data.frame(uk_sent))
+usa_tweets   <- summarise_data(usa_tweets,data.frame(usa_sent))
+spain_tweets <- summarise_data(spain_tweets,data.frame(spain_sent))
+italy_tweets <- summarise_data(italy_tweets,data.frame(italy_sent))
+grman_tweets <- summarise_data(grman_tweets,data.frame(grman_sent))
+```
+
+```{r}
+# Remove Trump's tweets about banning US migration from the German dataset (as it is causing a massive amount of bias)
+trump_tweet <- grman_tweets %>% 
+  filter(between(created_at, as.POSIXct("2020-04-21 00:00:00"), as.POSIXct("2020-04-22 00:00:00") )) %>% 
+  arrange(-weightings) %>% 
+  .[1,"status_id"]
+grman_tweets <- grman_tweets %>% filter(status_id != trump_tweet)
+```
+
+```{r}
+# Consolidate all tweets into single dataframe (non-weighted)
+tweets <- rbind(uk_tweets[,c('date','created_at','status_id','weightings','over_tweet_sent',
+                             'pn_sent','cntry_id','lexicon_text','sentiment_text')],
+                usa_tweets[,c('date','created_at','status_id','weightings','over_tweet_sent',
+                              'pn_sent','cntry_id','lexicon_text','sentiment_text')],
+                spain_tweets[,c('date','created_at','status_id','weightings','over_tweet_sent',
+                                'pn_sent','cntry_id','lexicon_text','sentiment_text')],
+                italy_tweets[,c('date','created_at','status_id','weightings','over_tweet_sent',
+                                'pn_sent','cntry_id','lexicon_text','sentiment_text')],
+                grman_tweets[,c('date','created_at','status_id','weightings','over_tweet_sent',
+                                'pn_sent','cntry_id','lexicon_text','sentiment_text')])
+rm(uk_tweets,uk_sent,usa_tweets,usa_sent,spain_tweets,spain_sent,italy_tweets,italy_sent,grman_tweets,grman_sent)
+
+# Removed reassign names of duplicated tweets (tweets which have been shared in more than 1 country).
+dupl <- tweets$status_id[duplicated(tweets$status_id)]
+tweets[tweets$status_id %in% dupl,'status_id'] <- seq(1,nrow(tweets[tweets$status_id %in% dupl,]),1)
+
+# Assign unique status ids to each tweet, so they are not regected by the lexicon model
+#tweets$status_id <- c(1:nrow(tweets))
+
+# Remove tweets that have no terms in them after Python text cleaning
+tweets <- subset(tweets, !is.na(tweets$lexicon_text))
+
+# Hold date for later
+timestamp <- tweets[,c("status_id","created_at",'weightings','over_tweet_sent','pn_sent',"cntry_id",'sentiment_text')]
+```
+
+
+GO TO 'UNDERSTAND WHAT TOPICS ARE' UNLESS YOU WANT TO TRAIN MODEL FROM SCRATCH
+
+```{r}
+# Convert data to a corpus
+hold <- tweets[,c("status_id", "lexicon_text")] # Subset required information
+rm(tweets)
+# Corpus requires following column names
+hold$status_id    <- as.character(hold$status_id)
+hold$lexicon_text <- as.character(hold$lexicon_text)
+names(hold)[names(hold) == "status_id"] <- "doc_id"
+names(hold)[names(hold) == "lexicon_text"] <- "text"
+corpus <- corpus(hold, text_field = "text") # Convert
+rm(hold)
+```
+
+
+
+# Analysis
+
+Classifying tweets using Latent Dirichlet Allocation
+```{r}
+# Convert to document-feature matrix
+dfm <- dfm(corpus)
+# Remove corpus
+rm(corpus)
+```
+
+```{r}
+# Calculate model fit for varying number of groups (slow)
+result <- FindTopicsNumber(
+  dfm,
+  topics = seq(from = 2, to = 20, by = 1), # Select range of topics to classify
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"), # Select metrics
+  method = "Gibbs", # Gibbs sampling
+  control = list(seed = 281190), # Set seed so can replicate
+  verbose = TRUE
+)
+```
+
+```{r}
+# Plot metrics
+FindTopicsNumber_plot(result)
+ggsave(paste0(rp,"outputs/topic_models_fit.png"), dpi=300)
+write.csv(result, paste0(rp,dp,"topic_models_fit.csv")) # Save metrics
+```
+
+```{r}
+# Classify tweets
+lda_results <- LDA(dfm, k = 15, control = list(seed = 281190), method = "Gibbs")
+```
+
+
+Save outputs
+```{r}
+# Get probability of each word being associated with each topic
+lda_topics <- tidy(lda_results, matrix = "beta")
+
+# Get probability of each tweet belonging to each topic
+lda_docs <- tidy(lda_results, matrix = "gamma") %>%
+  arrange(document, desc(gamma))
+
+# Save outputs
+#write.csv(lda_topics, file = paste0(rp,dp,'topic_models/tweet_topic_betas_7.csv'))
+#write.csv(lda_docs, file = paste0(rp,dp,'topic_models/tweet_topic_gammas_7.csv'))
+#write.csv(lda_topics, file = paste0(rp,dp,'topic_models/tweet_topic_betas_9.csv'))
+#write.csv(lda_docs, file = paste0(rp,dp,'topic_models/tweet_topic_gammas_9.csv'))
+#write.csv(lda_topics, file = paste0(rp,dp,'topic_models/tweet_topic_betas_11.csv'))
+#write.csv(lda_docs, file = paste0(rp,dp,'topic_models/tweet_topic_gammas_11.csv'))
+#write.csv(lda_topics, file = paste0(rp,dp,'topic_models/tweet_topic_betas_12.csv'))
+#write.csv(lda_docs, file = paste0(rp,dp,'topic_models/tweet_topic_gammas_12.csv'))
+#write.csv(lda_topics, file = paste0(rp,dp,'topic_models/tweet_topic_betas_13.csv'))
+#write.csv(lda_docs, file = paste0(rp,dp,'topic_models/tweet_topic_gammas_13.csv'))
+#write.csv(lda_topics, file = paste0(rp,dp,'topic_models/tweet_topic_betas_14.csv'))
+#write.csv(lda_docs, file = paste0(rp,dp,'topic_models/tweet_topic_gammas_14.csv'))
+#write.csv(lda_topics, file = paste0(rp,dp,'topic_models/tweet_topic_betas_15.csv'))
+#write.csv(lda_docs, file = paste0(rp,dp,'topic_models/tweet_topic_gammas_15.csv'))
+```
+
+# Plot FindTopicsNumber Results
+```{r, fig.width=14}
+# Read in Results
+result <- read_in_csv("topic_models_fit.csv")
+
+# Function to normalize results
+normalise <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+# Format data
+# Rearrange topic order
+result <- result %>% arrange(topics)
+# Normalise scores
+result$Griffiths2004 <- normalise(result$Griffiths2004)
+result$CaoJuan2009   <- normalise(result$CaoJuan2009)
+result$Arun2010      <- normalise(result$Arun2010)
+result$Deveaud2014   <- normalise(result$Deveaud2014)
+# Reshape to long-format
+result <- result %>% gather(method, score, Griffiths2004:Deveaud2014)
+# Add min column to facet wrap plots
+result$min <- "Minimise"
+result$min[result$method == "Griffiths2004" | result$method == "Deveaud2014"] <- "Maximise"
+result$min <- factor(result$min, levels = c("Minimise","Maximise"))
+
+
+# Plot results
+ggplot(result, aes(topics, score, color = method)) +
+  geom_line(size = 1) +
+  geom_point(size = 1.2) +
+  facet_wrap(~ min, nrow = 2, scales = "free") +
+  theme(text = element_text(size=20)) +
+  labs(y="") +
+  scale_x_continuous("Number of Topics", limits=c(2, 20), breaks=c(2:20)) +
+  scale_color_discrete(name = "Metric") +
+  theme_bw() +
+  theme(text = element_text(size = 50))
+```
+
+```{r}
+# Save results
+ggsave(paste0(rp,'outputs/topic_models_fit.png'), width = 11, height = 8, dpi=300)
+```
+
+
+# Understand what topics are
+```{r}
+# Define number of topics used
+topics <- 15
+```
+
+```{r}
+# Read in beta probabilities
+lda_topics <- read.csv(file = paste0(rp,dp,'tweet_topic_betas_',topics,'.csv'))
+lda_topics$X <- NULL
+lda_topics$term <- as.character(lda_topics$term)
+```
+
+```{r, fig.width=14, fig.height=14}
+# Identify terms that best describe tweets
+lda_top_terms <- lda_topics %>% 
+  group_by(topic) %>% # By topic (or cluster)
+  top_n(25, beta) %>% # Select ten most important terms
+  ungroup() %>%
+  arrange(topic, -beta)
+
+# Plot the results of above
+lda_top_terms %>% 
+  mutate(term = reorder_within(term, beta, topic)) %>% 
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+    scale_fill_manual("", values = unname(alphabet(topics))) +
+  labs(y="Beta",x="Terms") +
+  coord_flip() +
+  scale_x_reordered() +
+  theme_minimal() +
+  theme(text = element_text(size=20))
+```
+
+
+```{r}
+# Save results
+ggsave(paste0(rp,'outputs/topic_term_prob_',topics,'.png'), width = 8, height = 8, dpi=300)
+```
+
+
+# Plot trends in topics
+```{r}
+# Read in gamma probabilities
+lda_docs <- read.csv(file = paste0(rp,dp,'tweet_topic_gammas_',topics,'.csv'))
+lda_docs$X <- NULL
+lda_docs$document <- as.character(lda_docs$document)
+```
+
+```{r}
+# Aggregate to take highest probabilty for topic
+lda_agg <- lda_docs %>% 
+  group_by(document) %>% 
+  filter(gamma == max(gamma))
+
+# Join back on timestamp
+timestamp$status_id <- as.character(timestamp$status_id) # To match variable type
+lda_agg <- merge(lda_agg, timestamp, by.x = "document", by.y = "status_id", all.x = TRUE)
+```
+
+
+Recoding Topics
+```{r}
+# Define English Search Terms
+neutral_migrant_terms   = c("immigrant", "immigration", "migrant", "migration", "\"asylum seeker\"", "refugee", "\"undocumented worker\"", 
+                            "\"guest worker\"", "\"EU worker\"", "\"non-UK workers\"", "\"foreign worker\"", "(human smuggling)", "(human trafficking)")
+negative_migrant_terms  = c("illegals", "foreigner", "\"illegal alien\"", "\"illegal worker\"")
+negative_racial_terms   = c("islamophob*", "sinophob*", "\"china flu\"", "\"kung flu\"", "\"china virus\"", "\"chinese virus\"", "shangainese")
+search_terms <- c(neutral_migrant_terms, negative_migrant_terms, negative_racial_terms) %>% paste(collapse = " | ")
+
+# For k = 12
+
+# Filter topic 7 to only include migrant terms
+#MED <- lda_agg %>% filter(topic == 7) %>% filter(grepl(search_terms, sentiment_text)) %>% arrange(-gamma)
+# Reassign these tweets a new topic (there was a lot of noise in this category, so the other tweets will be assigned neutral)
+#lda_agg[lda_agg$document %in% MED$document & lda_agg$topic == 7,]$topic <- 13
+
+#12 "Anti-Racism"               1
+#6  "Pro-Migrant Activism"      2
+#2  "Human Rights Abuses"       3
+#1  "EU Refugee Crisis"         4
+#3  "Italian Migrant Debate"    5
+#4  "US Migrant Debate"         6
+#9  "Brexit"                    7
+#13 "Migration & Econ/Demogr"   8
+#10 "Coronavirus"               9
+#8  "Academic & Public Events"  10
+#7  "Law & Employment"          11
+#11 "Weather/Drinks (#ICE)"     11
+#5  "Miscellaneous"             11
+
+# Re-categories topics
+#lda_agg$topic_new <- lda_agg$topic + 20 # Create new topic variable that doesn't interfere with existing topics (topic + 20)
+#lda_agg[lda_agg$topic_new == (20 + 12),]$topic <- 1  # Topic 12 to 1
+#lda_agg[lda_agg$topic_new == (20 +  6),]$topic <- 2  # Topic 6  to 2 
+#lda_agg[lda_agg$topic_new == (20 +  2),]$topic <- 3  # Topic 2  to 3
+#lda_agg[lda_agg$topic_new == (20 +  1),]$topic <- 4  # Topic 1  to 4 
+#lda_agg[lda_agg$topic_new == (20 +  3),]$topic <- 5  # Topic 3  to 5 
+#lda_agg[lda_agg$topic_new == (20 +  4),]$topic <- 6  # Topic 4  to 6
+#lda_agg[lda_agg$topic_new == (20 +  9),]$topic <- 7  # Topic 9  to 7
+#lda_agg[lda_agg$topic_new == (20 + 13),]$topic <- 8  # Topic 13 to 8
+#lda_agg[lda_agg$topic_new == (20 + 10),]$topic <- 9  # Topic 10 to 9
+#lda_agg[lda_agg$topic_new == (20 +  8),]$topic <- 10 # Topic 8  to 10
+#lda_agg[lda_agg$topic_new == (20 +  7),]$topic <- 11 # Topic 7  to 11
+#lda_agg[lda_agg$topic_new == (20 + 11),]$topic <- 11 # Topic 11 to 11
+#lda_agg[lda_agg$topic_new == (20 +  5),]$topic <- 11 # Topic 5  to 11
+#lda_agg$topic_new <- NULL # Remove new topic variable
+
+# Redefine number of topics used
+#topics <- 11
+
+
+
+# For k = 11
+
+# Filter topic 7 to only include migrant terms
+#temp <- lda_agg %>% filter(topic == 6) %>% filter(grepl(search_terms, sentiment_text)) %>% arrange(-gamma)
+# Reassign these tweets a new topic (there was a lot of noise in this category, so the other tweets will be assigned neutral)
+#lda_agg[lda_agg$document %in% MED$document & lda_agg$topic == 7,]$topic <- 12
+
+#1  "Right-wing/Anti-Muslim Extremism"      1
+#2  "Political Discontentment"              2
+#3  "Migrant Boat Crossings"                3
+#4  "Academic & Public Events"              4
+#5  "Discrimination & Xenophobia" # Filter? 5
+#6  "Legal & Employment Issues"   # Filter? 10
+#7  "Coronavirus"                           6
+#8  "Weather (#ICE)"                        10
+#9  "Brexit & Immigration Systems"          7
+#10 "Human Rights Abuses"                   8
+#11 "Trump / US Border"                     9
+
+# Re-categories topics
+#lda_agg$topic_new <- lda_agg$topic + 20 # Create new topic variable that doesn't interfere with existing topics (topic + 20)
+#lda_agg[lda_agg$topic_new == (20 +  1),]$topic <- 1  # Topic 1  to 1
+#lda_agg[lda_agg$topic_new == (20 +  2),]$topic <- 2  # Topic 2  to 2 
+#lda_agg[lda_agg$topic_new == (20 +  3),]$topic <- 3  # Topic 3  to 3
+#lda_agg[lda_agg$topic_new == (20 +  4),]$topic <- 4  # Topic 4  to 4 
+#lda_agg[lda_agg$topic_new == (20 +  5),]$topic <- 5  # Topic 5  to 5 
+#lda_agg[lda_agg$topic_new == (20 +  7),]$topic <- 6  # Topic 4  to 6
+#lda_agg[lda_agg$topic_new == (20 +  9),]$topic <- 7  # Topic 9  to 7
+#lda_agg[lda_agg$topic_new == (20 + 10),]$topic <- 8  # Topic 13 to 8
+#lda_agg[lda_agg$topic_new == (20 + 11),]$topic <- 9  # Topic 10 to 9
+#lda_agg[lda_agg$topic_new == (20 +  6),]$topic <- 10 # Topic 8  to 10
+#lda_agg[lda_agg$topic_new == (20 +  8),]$topic <- 10 # Topic 7  to 11
+#lda_agg$topic_new <- NULL # Remove new topic variable
+
+# Redefine number of topics used
+#topics <- 10
+
+
+# For k = 14
+
+#1  "Migration & Econ/Demogr"       1
+#2  "Migrant Boat Crossings"        2
+#3  "Weather/Drinks/Cryo (#ICE)"    11
+#4  "Miscellaneous"                 11
+#5  "Brexit"                        3
+#6  "Business/Law/Data"             11
+#7  "Anti-\'Right-Wing Extremism\'" 4
+#8  "Misc/Migration Reform"         11
+#9  "Coronavirus"                   5
+#10 "US Detention Centres"          6
+#11 "Racism & Xenophobia"           7
+#12 "EU Refugee Crisis"             8
+#13 "Trump / Illegal Immigration"   9
+#14 "Human Rights Abuses"           10
+#15 "Misc/Migration Reform" (Filt)  9
+
+# Filter topic 8 to only include migrant terms
+#trmp_ill_migr <- lda_agg %>% filter(topic == 8) %>% filter(grepl(search_terms, sentiment_text)) %>% arrange(-gamma)
+# Reassign these tweets a new topic (there was a lot of noise in this category, so the other tweets will be assigned neutral)
+#lda_agg[lda_agg$document %in% trmp_ill_migr$document & lda_agg$topic == 8,]$topic <- 10
+
+# Re-categories topics
+#lda_agg$topic_new <- lda_agg$topic + 20 # Create new topic variable that doesn't interfere with existing topics (topic + 20)
+#lda_agg[lda_agg$topic_new == (20 +  1),]$topic <- 1  # Topic 1  to 1
+#lda_agg[lda_agg$topic_new == (20 +  2),]$topic <- 2  # Topic 2  to 2 
+#lda_agg[lda_agg$topic_new == (20 +  3),]$topic <- 11 # Topic 3  to 11
+#lda_agg[lda_agg$topic_new == (20 +  4),]$topic <- 11 # Topic 4  to 11 
+#lda_agg[lda_agg$topic_new == (20 +  5),]$topic <- 3  # Topic 5  to 3 
+#lda_agg[lda_agg$topic_new == (20 +  6),]$topic <- 11 # Topic 6  to 11
+#lda_agg[lda_agg$topic_new == (20 +  7),]$topic <- 4  # Topic 7  to 4
+#lda_agg[lda_agg$topic_new == (20 +  8),]$topic <- 11 # Topic 8  to 11
+#lda_agg[lda_agg$topic_new == (20 +  9),]$topic <- 5  # Topic 9  to 5
+#lda_agg[lda_agg$topic_new == (20 + 10),]$topic <- 6  # Topic 10 to 6
+#lda_agg[lda_agg$topic_new == (20 + 11),]$topic <- 7  # Topic 11 to 7
+#lda_agg[lda_agg$topic_new == (20 + 12),]$topic <- 8  # Topic 12 to 8
+#lda_agg[lda_agg$topic_new == (20 + 13),]$topic <- 9  # Topic 13 to 9
+#lda_agg[lda_agg$topic_new == (20 + 14),]$topic <- 10 # Topic 14 to 10
+#lda_agg$topic_new <- NULL # Remove new topic variable
+
+# Redefine number of topics used
+#topics <- 11
+
+
+
+
+# For k = 15
+
+
+# Commercial Law
+
+# Legal Assistance - filter commecial terms out of topic
+temp <- lda_agg %>% filter(topic == 3) %>% filter(!grepl("lawyer|attorney|client|AlexHanna|firm|company|companies|corporate|commercial", 
+                                                         sentiment_text, ignore.case = TRUE)) %>% arrange(-gamma)
+# Reassign these tweets a new topic (there was a lot of noise in this category, so the other tweets will be assigned neutral)
+lda_agg[lda_agg$document %in% temp$document & lda_agg$topic == 3,]$topic <- 16
+
+
+
+# Brexit - filter brexit terms from topic 6
+search_terms <- c("brexit", "nigel", "farage", neutral_migrant_terms, negative_migrant_terms, negative_racial_terms) %>% paste(collapse = "|")
+temp <- lda_agg %>% filter(topic == 6) %>% filter(grepl(search_terms, sentiment_text, ignore.case = TRUE)) %>% arrange(-gamma)
+# Reassign these tweets a new topic (there was a lot of noise in this category, so the other tweets will be assigned neutral)
+lda_agg[lda_agg$document %in% temp$document & lda_agg$topic == 6,]$topic <- 17
+
+
+
+# Academic & Public Events - filter out non-data/nature events from topic 9
+search_terms <- c(neutral_migrant_terms, negative_migrant_terms, negative_racial_terms) %>% paste(collapse = "|")
+filter_terms <- c("data","automate","wordpress","sterling","4HANA","nature","ecology","website","OAuth","authentication",
+                  "offers","savings","seamless","users","full-stack","4g","5g","technology","purchase","windows",
+                  "software","backend","developer") %>% paste(collapse = "|")
+temp <- lda_agg %>% filter(topic == 9) %>% filter(grepl(search_terms, sentiment_text, ignore.case = TRUE)) %>%
+            filter(!grepl(filter_terms, sentiment_text, ignore.case = TRUE)) %>% arrange(-gamma)
+# Reassign these tweets a new topic (there was a lot of noise in this category, so the other tweets will be assigned neutral)
+lda_agg[lda_agg$document %in% temp$document & lda_agg$topic == 9,]$topic <- 18
+
+
+
+# Misc Migration - filter out migration terms from topic 12
+search_terms <- c(neutral_migrant_terms, negative_migrant_terms, negative_racial_terms) %>% paste(collapse = "|")
+temp <- lda_agg %>% filter(topic == 12) %>% filter(grepl(search_terms, sentiment_text, ignore.case = TRUE)) %>% arrange(-gamma)
+# Reassign these tweets a new topic (there was a lot of noise in this category, so the other tweets will be assigned neutral)
+lda_agg[lda_agg$document %in% temp$document & lda_agg$topic == 12,]$topic <- 19
+
+
+
+# Misc Migration Travel - filter out migration terms from topic 13
+search_terms <- c("cage", "detention", "detain", "holding facility", "ICE", 
+                  neutral_migrant_terms, negative_migrant_terms, negative_racial_terms) %>% paste(collapse = "|")
+temp <- lda_agg %>% filter(topic == 13) %>% filter(grepl(search_terms, sentiment_text, ignore.case = TRUE)) %>% arrange(-gamma)
+# Reassign these tweets a new topic (there was a lot of noise in this category, so the other tweets will be assigned neutral)
+lda_agg[lda_agg$document %in% temp$document & lda_agg$topic == 13,]$topic <- 20
+
+
+
+# EU Refugee Crisis 2 - filter out migrant and refugee terms (but not ICE) from topic 15
+search_terms <- c("camp","Moria","resettle","#WirHabenPlatz","evacuat","safe haven","greek","greece",
+                  neutral_migrant_terms, negative_migrant_terms, negative_racial_terms) %>% paste(collapse = "|")
+temp <- lda_agg %>% filter(topic == 15) %>% filter(grepl(search_terms, sentiment_text, ignore.case = TRUE)) %>% 
+                    filter(!grepl("ICE|Trump", sentiment_text, ignore.case = TRUE)) %>% arrange(-gamma)
+# Reassign these tweets a new topic (there was a lot of noise in this category, so the other tweets will be assigned neutral)
+lda_agg[lda_agg$document %in% temp$document & lda_agg$topic == 15,]$topic <- 21
+
+# Coronavirus 2 - filter out covid terms from topic 15
+temp <- lda_agg %>% filter(topic == 15) %>% filter(!grepl(search_terms, sentiment_text, ignore.case = TRUE)) %>% 
+            filter(grepl("corona|covid|distancing|StayAtHome|wash|medical", sentiment_text, ignore.case = TRUE)) %>% arrange(-gamma)
+# Reassign these tweets a new topic (there was a lot of noise in this category, so the other tweets will be assigned neutral)
+lda_agg[lda_agg$document %in% temp$document & lda_agg$topic == 15,]$topic <- 22
+
+# Human Rights Abuses 2 - filter out migrant detention terms from topic 15
+temp <- lda_agg %>% filter(topic == 15) %>% filter(!grepl(search_terms, sentiment_text, ignore.case = TRUE)) %>% 
+            filter(grepl("cage|detention|detain|holding facility|ICE|Trump", sentiment_text, ignore.case = TRUE)) %>% arrange(-gamma)
+# Reassign these tweets a new topic (there was a lot of noise in this category, so the other tweets will be assigned neutral)
+lda_agg[lda_agg$document %in% temp$document & lda_agg$topic == 15,]$topic <- 23
+
+
+#1  Miscellaneous                 #12
+#2  COVID-19 East Asian Prejudice #6
+#3  Commercial Law                #12
+#4  Migrant Boat Crossings        #10
+#5  Undocumented Immigration      #8
+#6  Misc UK                       #12
+#7  Trump                         #3
+#8  Racism / Xenophobia           #7
+#9  Misc Events                   #12
+#10 Weather                       #12
+#11 Vulnerable EU Migrants        #4
+#12 Miscellaneous                 #12
+#13 Misc Travel                   #12
+#14 Human Rights Abuses           #1
+#15 Activism                      #2
+#16 Legal Assistance              #11
+#17 Brexit                        #9
+#18 Academic & Public Events      #5
+#19 Misc Migration                #11
+#20 Misc Migration Travel         #11
+#21 Vulnerable EU Migrants 2      #4
+#22 Coronavirus 2                 #6
+#23 Human Rights Abuses 2         #1
+
+# Re-categories topics
+lda_agg$topic_new <- lda_agg$topic + 30 # Create new topic variable that doesn't interfere with existing topics (topic + 20)
+lda_agg[lda_agg$topic_new == (30 +  1),]$topic <- 12
+lda_agg[lda_agg$topic_new == (30 +  2),]$topic <- 6
+lda_agg[lda_agg$topic_new == (30 +  3),]$topic <- 12 
+lda_agg[lda_agg$topic_new == (30 +  4),]$topic <- 10 
+lda_agg[lda_agg$topic_new == (30 +  5),]$topic <- 8
+lda_agg[lda_agg$topic_new == (30 +  6),]$topic <- 12 
+lda_agg[lda_agg$topic_new == (30 +  7),]$topic <- 3
+lda_agg[lda_agg$topic_new == (30 +  8),]$topic <- 7 
+lda_agg[lda_agg$topic_new == (30 +  9),]$topic <- 12 
+lda_agg[lda_agg$topic_new == (30 + 10),]$topic <- 12 
+lda_agg[lda_agg$topic_new == (30 + 11),]$topic <- 4
+lda_agg[lda_agg$topic_new == (30 + 12),]$topic <- 12 
+lda_agg[lda_agg$topic_new == (30 + 13),]$topic <- 12 
+lda_agg[lda_agg$topic_new == (30 + 14),]$topic <- 1 
+lda_agg[lda_agg$topic_new == (30 + 15),]$topic <- 2 
+lda_agg[lda_agg$topic_new == (30 + 16),]$topic <- 11
+lda_agg[lda_agg$topic_new == (30 + 17),]$topic <- 9 
+lda_agg[lda_agg$topic_new == (30 + 18),]$topic <- 5 
+lda_agg[lda_agg$topic_new == (30 + 19),]$topic <- 11 
+lda_agg[lda_agg$topic_new == (30 + 20),]$topic <- 11 
+lda_agg[lda_agg$topic_new == (30 + 21),]$topic <- 4
+lda_agg[lda_agg$topic_new == (30 + 22),]$topic <- 6 
+lda_agg[lda_agg$topic_new == (30 + 23),]$topic <- 1
+lda_agg$topic_new <- NULL # Remove new topic variable
+
+# Redefine number of topics used
+topics <- 12
+```
+
+```{r}
+# Examine topic tweets
+lda_agg2 <- lda_agg
+lda_agg2 %>% filter(topic == 3, cntry_id == 1) %>% 
+  filter(between(created_at, as.POSIXct("2020-04-21 00:00:00"), as.POSIXct("2020-04-30 00:00:00") )) %>% 
+  filter(over_tweet_sent > 0) %>% arrange(-weightings)
+lda_agg2 %>% filter(topic == 3, cntry_id == 2) %>% 
+  filter(between(created_at, as.POSIXct("2020-04-21 00:00:00"), as.POSIXct("2020-04-30 00:00:00") )) %>% 
+  filter(over_tweet_sent < 0) %>% arrange(-weightings)
+lda_agg2 %>% filter(topic == 3, grepl("uk|boris|brexit|britain|nigel|farage",sentiment_text,ignore.case = TRUE)) %>% arrange(-gamma)
+
+lda_agg2 %>% filter(topic == 6) %>% arrange(-gamma)
+```
+
+
+Expanding the dataset (optional)
+```{r}
+# Function to expand the data (e.g. duplicate each tweet by it's number of retweets to account for )
+apply_weightings <- function (x) {
+  # Create rownames variable (needed for ordering below)
+  x$rownames <- as.numeric(row.names(x))
+  # Duplicate each row by weightings
+  x <- x[rep(row.names(x), x$weightings), ]
+  # Remove rownames
+  x$rownames <- NULL
+  # Return results
+  return(x)
+}
+
+lda_agg <- apply_weightings(lda_agg)
+```
+
+```{r}
+# Get topic break downs (optional)
+get_topic_counts <- function(x,y,z,cntry_filter=TRUE) {
+  if (cntry_filter == TRUE) {
+    x <- x %>% filter(cntry_id == y) %>% group_by(topic) %>% summarise(count = n())
+  } else {
+    x <- x %>% group_by(topic) %>% summarise(count = n())
+  }
+  x$percen <- round((x$count / sum(x$count)) * 100, digits = 2)
+  names(x) <- c("Topic", paste0(z," Count"), paste0(z," Precentage"))
+  return(x)
+}
+
+grman_topics <- get_topic_counts(lda_agg,5,"German")
+italy_topics <- get_topic_counts(lda_agg,4,"Italy")
+spain_topics <- get_topic_counts(lda_agg,3,"Spain")
+uk_topics    <- get_topic_counts(lda_agg,1,"UK")
+usa_topics   <- get_topic_counts(lda_agg,2,"USA")
+all_topics   <- get_topic_counts(lda_agg,NA,"Total",cntry_filter = FALSE)
+
+topic_counts <- cbind(grman_topics,italy_topics[,c(2:3)],spain_topics[,c(2:3)],
+                      uk_topics[,c(2:3)],usa_topics[,c(2:3)],all_topics[,c(2:3)])
+#View(topic_counts)
+```
+
+```{r}
+# Subset set for different countries
+uk_tweet_topics    <- lda_agg %>% filter(cntry_id == 1) %>% arrange(created_at)
+usa_tweet_topics   <- lda_agg %>% filter(cntry_id == 2) %>% arrange(created_at)
+spain_tweet_topics <- lda_agg %>% filter(cntry_id == 3) %>% arrange(created_at)
+italy_tweet_topics <- lda_agg %>% filter(cntry_id == 4) %>% arrange(created_at)
+grman_tweet_topics <- lda_agg %>% filter(cntry_id == 5) %>% arrange(created_at)
+```
+
+```{r}
+# Aggregate by day
+topics_by_day <- function(x) {
+  x$day <- cut(x$created_at, breaks='day') # Split by day
+  x <- x %>% group_by(day) %>% dplyr::count(topic) # Count topics by day
+  names(x)[names(x) == 'n'] <- 'daily_tweets'
+  total_tweets <- x %>% group_by(day) %>% dplyr::summarize(total_tweets = sum(daily_tweets)) # Obtain daily total tweets
+  x <- merge(x, total_tweets, by = 'day', all.x = TRUE) # Assign daily totals to each daily topic
+  x$daily_perc <- round( ( x$daily_tweets / x$total_tweets ) * 100, digits = 3) # Calculate percentage of total tweets assigned to each topic
+  x$day <- ymd(as.character(x$day)) # Convert to date format
+  x$topic <- as.factor(x$topic)
+  x$total_tweets <- NULL # Remove daily tweets
+  return(x)
+}
+
+uk_daily_topics    <- topics_by_day(uk_tweet_topics)
+usa_daily_topics   <- topics_by_day(usa_tweet_topics)
+spain_daily_topics <- topics_by_day(spain_tweet_topics)
+italy_daily_topics <- topics_by_day(italy_tweet_topics)
+grman_daily_topics <- topics_by_day(grman_tweet_topics)
+```
+
+
+```{r, fig.width=14, fig.height=14}
+# Define colour scheme
+colours <- c(rbind(c(rev(plasma(topics))[seq(0,(topics-1)/2,2)],
+                     rev(inferno(topics))[seq(topics/2,topics,2)]),
+                   rev(viridis(topics))[seq(1,topics,2)]))
+colours[9] <- "#4D4D4D"
+
+# Plot
+plot_topic_daily_perc <- function(df,title,topics,lab="-",leg=FALSE) {
+  # Main plot
+  p <- ggplot(df, aes(fill = topic, y=daily_perc, x=day)) + 
+    geom_bar(position="stack", stat="identity") + 
+    theme_tufte() + 
+    scale_x_date(expand = c(0.01,0)) +
+    theme(text = element_text(family="robotocondensed",
+                              size = 20),
+          legend.position = "right",
+          plot.margin = unit(c(0,0,0,0), 'cm')) +
+    ggtitle(title)
+  
+  # Adjust scale to no. topics
+  if (topics == 7) {
+    key_labels <- c("EU Migrant Crisis","US Border","Spain/Italy",
+                    "Pro-migration","Misc","Coronavirus","Racism")
+  } else if (topics == 9) {
+     key_labels <- c("Spanish Anti-Immigrant","European Refugees","US Detention","US Migrant Rights","Legal Aspects",
+                     "Miscellaneous","Brexit","Coronavirus","German AFD Movement")
+  } else if (topics == 10) {
+     key_labels <- c("Right-wing/Anti-Muslim Extremism", "Political Discontentment", "Migrant Boat Crossings", "Academic & Public Events",
+                     "Discrimination & Xenophobia", "Coronavirus", "Brexit & Immigration Systems", "Human Rights Abuses", "Trump / US Border",
+                     "Miscellaneous")
+  } else if (topics == 11) {
+     key_labels <- c("Migration & Econ/Demogr", "Migrant Boat Crossings", "Brexit", "Anti-\'Right-Wing Extremism\'", "Coronavirus", 
+                     "US Detention Centres", "Racism & Xenophobia", "EU Refugee Crisis", "Trump / Illegal Immigration", 
+                     "Human Rights Abuses", "Miscellaneous")
+  #} else if (topics == 11) {
+  #   key_labels <- c("Anti-Racism","Pro-Migrant Activism","Human Rights Abuses","EU Refugee Crisis",
+  #                   "Italian Migrant Debate","US Migrant Debate", "Brexit","Migration & Econ/Demogr",
+  #                   "Coronavirus","Academic & Public Events","Miscellaneous")
+  #} else if (topics == 12) {
+  #   key_labels <- c("EU Refugee Crisis","Human Rights Abuses","Italian Migrant Debate","US Migrant Debate",
+  #                   "Miscellaneous","Pro-Migrant Activism","Law,Work,Demography,Migration","Academic & Public Events",
+  #                   "Brexit","Coronavirus","Weather/Drinks (#ICE)","Anti-Racism")
+  } else if (topics == 12) {
+     key_labels <- c("Human Rights Abuses","Activism","Trump","Vulnerable EU Migrants","Legal Assistance", 
+                     "COVID-19 East Asian Prejudice","Racism/Xenophia","Undocumented Immigration","Brexit","Migrant Boat Crossings",
+                     "Miscellaneous","Noise")
+  }
+  
+  # Conditional legend
+  if (leg == TRUE) {
+    p <- p + scale_fill_manual("", values = colours, labels = key_labels)
+  } else {
+    p <- p + scale_fill_manual("", values = colours) +
+             theme(legend.position = "none")
+  }
+  
+  # Conditional labels
+  if (lab == "-") {
+    p <- p + labs(x = "", y = "")
+  } else if (lab == "y") {
+    p <- p + labs(x = "", y = "Percent of Daily Tweets")
+  } else if (lab == "x") {
+    p <- p + labs(x = "Day", y = "")
+  } else if (lab == "xy") {
+    p <- p + labs(x = "Day", y = "Percent of Daily Tweets")
+  } 
+}
+
+italy_dp <- plot_topic_daily_perc(italy_daily_topics,'Italy'         ,topics)
+grman_dp <- plot_topic_daily_perc(grman_daily_topics,'Germany'       ,topics)
+spain_dp <- plot_topic_daily_perc(spain_daily_topics,'Spain'         ,topics,lab='y',leg=TRUE)
+uk_dp    <- plot_topic_daily_perc(uk_daily_topics,   'United Kingdom',topics)
+usa_dp   <- plot_topic_daily_perc(usa_daily_topics,  'United States' ,topics,lab='x')
+
+grman_dp + italy_dp + spain_dp + uk_dp + usa_dp + plot_layout(nrow = 5) & theme(legend.key.size = unit(0.25, 'cm'), legend.box.spacing = unit(0.1, 'cm'))
+```
+
+
+```{r}
+# Save results
+#ggsave(paste0(rp,'outputs/daily_topics_perc_',topics,'.png'), width = 5, height = 6.5, dpi=300)
+ggsave(paste0(rp,'outputs/daily_topics_perc_',topics,'_from_15_exp.png'), width = 5, height = 6.5, dpi=300)
+```
+
+
+```{r, fig.width=14, fig.height=14}
+# Define colour scheme
+colours <- c(rbind(c(rev(plasma(topics))[seq(0,(topics-1)/2,2)],
+                     rev(inferno(topics))[seq(topics/2,topics,2)]),
+                   rev(viridis(topics))[seq(1,topics,2)]))
+colours[9] <- "#4D4D4D"
+
+
+# Function which plots stacked line graph
+plot_topic_daily_count <- function(df,title,topics,lab="-",leg=FALSE) {
+  
+  # Main plot
+  p <- ggplot(df, aes(fill = topic, y=daily_tweets, x=day)) + 
+    geom_area(position="stack", stat="identity", size = 0.5) + 
+    theme_tufte() + 
+    scale_x_date(expand = c(0.01,0)) +
+    theme(text = element_text(family="robotocondensed",
+                              size = 20),
+          legend.position = "right",
+          plot.margin = unit(c(0,0,0,0), 'cm')) +
+    ggtitle(title)
+  
+  # Adjust scale to no. topics
+  if (topics == 7) {
+    key_labels <- c("EU Migrant Crisis","US Border","Spain/Italy",
+                    "Pro-migration","Misc","Coronavirus","Racism")
+  } else if (topics == 9) {
+     key_labels <- c("Spanish Anti-Immigrant","European Refugees","US Detention","US Migrant Rights","Legal Aspects",
+                     "Miscellaneous","Brexit","Coronavirus","German AFD Movement")
+  } else if (topics == 10) {
+     key_labels <- c("Right-wing/Anti-Muslim Extremism", "Political Discontentment", "Migrant Boat Crossings", "Academic & Public Events",
+                     "Discrimination & Xenophobia", "Coronavirus", "Brexit & Immigration Systems", "Human Rights Abuses", "Trump / US Border",
+                     "Miscellaneous")
+  } else if (topics == 11) {
+     key_labels <- c("Migration & Econ/Demogr", "Migrant Boat Crossings", "Brexit", "Anti-\'Right-Wing Extremism\'", "Coronavirus", 
+                     "US Detention Centres", "Racism & Xenophobia", "EU Refugee Crisis", "Trump / Illegal Immigration", 
+                     "Human Rights Abuses", "Miscellaneous")
+  #} else if (topics == 11) {
+  #   key_labels <- c("Anti-Racism","Pro-Migrant Activism","Human Rights Abuses","EU Refugee Crisis",
+  #                   "Italian Migrant Debate","US Migrant Debate", "Brexit","Migration & Econ/Demogr",
+  #                   "Coronavirus","Academic & Public Events","Miscellaneous")
+  #} else if (topics == 12) {
+  #   key_labels <- c("EU Refugee Crisis","Human Rights Abuses","Italian Migrant Debate","US Migrant Debate",
+  #                   "Miscellaneous","Pro-Migrant Activism","Law,Work,Demography,Migration","Academic & Public Events",
+  #                   "Brexit","Coronavirus","Weather/Drinks (#ICE)","Anti-Racism")
+  } else if (topics == 12) {
+     key_labels <- c("Human Rights Abuses","Activism","Trump","Vulnerable EU Migrants","Legal Assistance", 
+                     "COVID-19 East Asian Prejudice","Racism/Xenophia","Undocumented Immigration","Brexit","Migrant Boat Crossings",
+                     "Miscellaneous","Noise")
+  }
+  
+  # Conditional legend
+  if (leg == TRUE) {
+    p <- p + scale_fill_manual("", values = colours, labels = key_labels)
+  } else {
+    p <- p + scale_fill_manual("", values = colours) +
+             theme(legend.position = "none")
+  }
+  
+  # Conditional labels
+  if (lab == "-") {
+    p <- p + labs(x = "", y = "")
+  } else if (lab == "y") {
+    p <- p + labs(x = "", y = "Daily Tweet Count")
+  } else if (lab == "x") {
+    p <- p + labs(x = "Day", y = "")
+  } else if (lab == "xy") {
+    p <- p + labs(x = "Day", y = "Daily Tweet Count")
+  } 
+}
+
+# Plot graphs
+grman_dc <- plot_topic_daily_count(grman_daily_topics,'Germany'       ,topics)
+italy_dc <- plot_topic_daily_count(italy_daily_topics,'Italy'         ,topics)
+spain_dc <- plot_topic_daily_count(spain_daily_topics,'Spain'         ,topics,lab='y',leg=TRUE)
+uk_dc    <- plot_topic_daily_count(uk_daily_topics,   'United Kingdom',topics)
+usa_dc   <- plot_topic_daily_count(usa_daily_topics,  'United States' ,topics,lab='x')
+
+grman_dc + italy_dc + spain_dc + uk_dc + usa_dc + plot_layout(nrow = 5) & theme(legend.key.size = unit(0.25, 'cm'), legend.box.spacing = unit(0.1, 'cm'))
+```
+
+```{r}
+# Save results
+ggsave(paste0(rp,'outputs/daily_topics_count_',topics,'_from_15_exp.png'), width = 7, height = 8, dpi=300)
+```
+
+
+# Break Down by VADER Sentiment
+
+```{r}
+# Subset set for sentiment and different countries
+uk_pos_topics    <- lda_agg %>% filter(pn_sent == 1 & cntry_id == 1) %>% arrange(created_at)
+uk_neg_topics    <- lda_agg %>% filter(pn_sent == 2 & cntry_id == 1) %>% arrange(created_at)
+usa_pos_topics   <- lda_agg %>% filter(pn_sent == 1 & cntry_id == 2) %>% arrange(created_at)
+usa_neg_topics   <- lda_agg %>% filter(pn_sent == 2 & cntry_id == 2) %>% arrange(created_at)
+spain_pos_topics <- lda_agg %>% filter(pn_sent == 1 & cntry_id == 3) %>% arrange(created_at)
+spain_neg_topics <- lda_agg %>% filter(pn_sent == 2 & cntry_id == 3) %>% arrange(created_at)
+italy_pos_topics <- lda_agg %>% filter(pn_sent == 1 & cntry_id == 4) %>% arrange(created_at)
+italy_neg_topics <- lda_agg %>% filter(pn_sent == 2 & cntry_id == 4) %>% arrange(created_at)
+grman_pos_topics <- lda_agg %>% filter(pn_sent == 1 & cntry_id == 5) %>% arrange(created_at)
+grman_neg_topics <- lda_agg %>% filter(pn_sent == 2 & cntry_id == 5) %>% arrange(created_at)
+```
+
+```{r}
+# Aggregate by day
+topics_by_day <- function(x) {
+  x$day <- cut(x$created_at, breaks='day') %>% as.Date() # Split by day
+  x <- x %>% group_by(day) %>% dplyr::count(topic) # Count topics by day
+  names(x)[names(x) == 'n'] <- 'daily_tweets'
+  total_tweets <- x %>% group_by(day) %>% dplyr::summarize(total_tweets = sum(daily_tweets)) # Obtain daily total tweets
+  x <- merge(x, total_tweets, by = 'day', all.x = TRUE) # Assign daily totals to each daily topic
+  x$daily_perc <- round( ( x$daily_tweets / x$total_tweets ) * 100, digits = 3) # Calculate percentage of total tweets assigned to each topic
+  x$day <- ymd(as.character(x$day)) # Convert to date format
+  x$topic <- as.factor(x$topic)
+  x$total_tweets <- NULL # Remove daily tweets
+  return(x)
+}
+
+uk_daily_topics_pos    <- topics_by_day(uk_pos_topics)
+uk_daily_topics_neg    <- topics_by_day(uk_neg_topics)
+usa_daily_topics_pos   <- topics_by_day(usa_pos_topics)
+usa_daily_topics_neg   <- topics_by_day(usa_neg_topics)
+spain_daily_topics_pos <- topics_by_day(spain_pos_topics)
+spain_daily_topics_neg <- topics_by_day(spain_neg_topics)
+italy_daily_topics_pos <- topics_by_day(italy_pos_topics)
+italy_daily_topics_neg <- topics_by_day(italy_neg_topics)
+grman_daily_topics_pos <- topics_by_day(grman_pos_topics)
+grman_daily_topics_neg <- topics_by_day(grman_neg_topics)
+```
+
+```{r}
+# Define colour scheme
+colours <- c(rbind(c(rev(plasma(topics))[seq(0,(topics-1)/2,2)],
+                     rev(inferno(topics))[seq(topics/2,topics,2)]),
+                   rev(viridis(topics))[seq(1,topics,2)]))
+colours[9] <- "#4D4D4D"
+
+# Plot
+plot_topic_daily_perc <- function(df,title,topics,lab="-",leg=FALSE) {
+  # Main plot
+  p <- ggplot(df, aes(fill = topic, y=daily_perc, x=day)) + 
+    geom_bar(position="stack", stat="identity") + 
+    theme_tufte() + 
+    scale_x_date(expand = c(0.01,0)) +
+    theme(text = element_text(family="robotocondensed",
+                              size = 20),
+          legend.position = "right",
+          plot.margin = unit(c(0,0,0,0), 'cm')) +
+    ggtitle(title)
+  
+  # Adjust scale to no. topics
+  if (topics == 7) {
+    key_labels <- c("EU Migrant Crisis","US Border","Spain/Italy",
+                    "Pro-migration","Misc","Coronavirus","Racism")
+  } else if (topics == 9) {
+     key_labels <- c("Spanish Anti-Immigrant","European Refugees","US Detention","US Migrant Rights","Legal Aspects",
+                     "Miscellaneous","Brexit","Coronavirus","German AFD Movement")
+  } else if (topics == 10) {
+     key_labels <- c("Right-wing/Anti-Muslim Extremism", "Political Discontentment", "Migrant Boat Crossings", "Academic & Public Events",
+                     "Discrimination & Xenophobia", "Coronavirus", "Brexit & Immigration Systems", "Human Rights Abuses", "Trump / US Border",
+                     "Miscellaneous")
+  } else if (topics == 11) {
+     key_labels <- c("Migration & Econ/Demogr", "Migrant Boat Crossings", "Brexit", "Anti-\'Right-Wing Extremism\'", "Coronavirus", 
+                     "US Detention Centres", "Racism & Xenophobia", "EU Refugee Crisis", "Trump / Illegal Immigration", 
+                     "Human Rights Abuses", "Miscellaneous")
+  #} else if (topics == 11) {
+  #   key_labels <- c("Anti-Racism","Pro-Migrant Activism","Human Rights Abuses","EU Refugee Crisis",
+  #                   "Italian Migrant Debate","US Migrant Debate", "Brexit","Migration & Econ/Demogr",
+  #                   "Coronavirus","Academic & Public Events","Miscellaneous")
+  #} else if (topics == 12) {
+  #   key_labels <- c("EU Refugee Crisis","Human Rights Abuses","Italian Migrant Debate","US Migrant Debate",
+  #                   "Miscellaneous","Pro-Migrant Activism","Law,Work,Demography,Migration","Academic & Public Events",
+  #                   "Brexit","Coronavirus","Weather/Drinks (#ICE)","Anti-Racism")
+  } else if (topics == 12) {
+     key_labels <- c("Human Rights Abuses","Activism","Trump","Vulnerable EU Migrants","Legal Assistance", 
+                     "COVID-19 East Asian Prejudice","Racism/Xenophia","Undocumented Immigration","Brexit","Migrant Boat Crossings",
+                     "Miscellaneous","Noise")
+  }
+  
+  # Conditional legend
+  if (leg == TRUE) {
+    p <- p + scale_fill_manual("", values = colours, labels = key_labels)
+  } else {
+    p <- p + scale_fill_manual("", values = colours) +
+             theme(legend.position = "none")
+  }
+  
+  # Conditional labels
+  if (lab == "-") {
+    p <- p + labs(x = "", y = "")
+  } else if (lab == "y") {
+    p <- p + labs(x = "", y = "Percent of Daily Tweets")
+  } else if (lab == "x") {
+    p <- p + labs(x = "Day", y = "")
+  } else if (lab == "xy") {
+    p <- p + labs(x = "Day", y = "Percent of Daily Tweets")
+  } 
+}
+
+
+grman_dp_pos <- plot_topic_daily_perc(grman_daily_topics_pos,'Positive\nGermany',topics)
+italy_dp_pos <- plot_topic_daily_perc(italy_daily_topics_pos,'Italy'            ,topics)
+spain_dp_pos <- plot_topic_daily_perc(spain_daily_topics_pos,'Spain'            ,topics,lab='y')
+uk_dp_pos    <- plot_topic_daily_perc(uk_daily_topics_pos,   'United Kingdom'   ,topics)
+usa_dp_pos   <- plot_topic_daily_perc(usa_daily_topics_pos,  'United States'    ,topics,lab='x')
+
+grman_dp_neg <- plot_topic_daily_perc(grman_daily_topics_neg,'Negative\n'       ,topics)
+italy_dp_neg <- plot_topic_daily_perc(italy_daily_topics_neg,' '                ,topics)
+spain_dp_neg <- plot_topic_daily_perc(spain_daily_topics_neg,' '                ,topics,leg = TRUE)
+uk_dp_neg    <- plot_topic_daily_perc(uk_daily_topics_neg,   ' '                ,topics)
+usa_dp_neg   <- plot_topic_daily_perc(usa_daily_topics_neg,  ' '                ,topics,lab='x')
+```
+
+
+```{r, fig.width=14,fig.height=14}
+((grman_dp_pos|grman_dp_neg) / (italy_dp_pos|italy_dp_neg) / (spain_dp_pos|spain_dp_neg) / (uk_dp_pos|uk_dp_neg) / (usa_dp_pos|usa_dp_neg)) + plot_layout(nrow = 5) & theme(legend.key.size = unit(0.25, 'cm'), legend.box.spacing = unit(0.1, 'cm'))
+```
+
+```{r}
+# Plot and save output
+ggsave(paste0(rp,'outputs/daily_topics_perc_',topics,'_pn_exp.png'), width = 6.5, height = 6.5, dpi=300)
+```
+
+## Code for selecting colour pallettes
+```{r}
+# Hexadecimal color specification 
+brewer.pal(n = 7, name = 'RdGy')
+```
+
+```{r}
+# View a single RColorBrewer palette by specifying its name
+display.brewer.pal(n = 7, name = 'RdGy')
+```
+
+```{r, fig.height=7}
+display.brewer.all()
+```

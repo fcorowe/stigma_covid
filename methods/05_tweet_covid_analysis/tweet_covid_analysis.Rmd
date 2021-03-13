@@ -1,0 +1,418 @@
+---
+title: "Tweet Count and Covid Analysis"
+author: "F Rowe, M Mahony"
+---
+
+# Library necessary packages
+```{r}
+library(tidyverse)
+library(tidytext)
+library(textdata)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(countrycode)
+library(plyr)
+library(lubridate)
+library(ggplot2)
+library(RColorBrewer)
+library(sentimentr)
+library(ggthemes)
+library(showtext)
+library(vader)
+library(patchwork)
+library(viridis)
+library(scales)
+```
+
+Set font style
+```{r}
+# load font
+font_add_google("Roboto Condensed", "robotocondensed")
+# automatically use showtext to render text
+showtext_auto()
+```
+
+# Import tweet data
+```{r}
+# Set rootpaths
+rp <- ' '
+dp <- 'data/tweet_data/'
+mp <- 'methods/'
+
+# Function to read in data
+read_in_csv <- function(x) {
+  x <- suppressWarnings(suppressMessages(read_csv(paste0(rp,dp,x))))
+  x$X1 <- NULL
+  return(x)
+}
+
+# Save tweets as csv
+uk_tweets    <- read_in_csv('tweets/uk_tweets_01122019_01052020_VLC.csv')
+usa_tweets   <- read_in_csv('tweets/usa_tweets_01122019_01052020_VLC.csv')
+spain_tweets <- read_in_csv('tweets/spain_tweets_01122019_01052020_VTLC.csv')
+italy_tweets <- read_in_csv('tweets/italy_tweets_01122019_01052020_VTLC.csv')
+grman_tweets <- read_in_csv('tweets/grman_tweets_01122019_01052020_VTLC.csv')
+```
+
+```{r}
+# Function which creates a date variable, 
+# removes the index imported as part of the csv file and 
+# assigned a country id
+format_data <- function(x) {
+  
+  # Split string character date
+  date_df <- x$created_at %>% 
+    str_split(" ", simplify = TRUE) %>% 
+    as.data.frame()
+  
+  # Create date variable
+  x$date <- ymd(date_df$V1)
+  
+  # Remove original index and group column
+  x$X1          <- NULL
+  x$group_index <- NULL
+  
+  # Create hour variable
+  x$hour <- ymd_h(substr(x$created_at,1,13))
+  
+  # Determine country
+  cntry <- names(sort(table(x$country),decreasing=TRUE)[1])
+  
+  # Assign country id
+  if        (cntry == "United Kingdom") {
+    x$cntry_id <- 1
+  } else if (cntry == "United States") {
+    x$cntry_id <- 2
+  } else if (cntry == "Spain") {
+    x$cntry_id <- 3
+  } else if (cntry == "Italy") {
+    x$cntry_id <- 4
+  } else {            #Germany
+    x$cntry_id <- 5 
+  }
+  
+  # One tweet in the USA had a misallocated retweet count (was status_id). This was throwing errors, so is removed by this line
+  x <- subset(x,!is.na(suppressWarnings(as.integer(x$retweet_count))))
+  
+  
+  # Creating weightings variable, which accounts for retweets of certain tweets 
+  
+  # Default the weighting to 1
+  x$weightings <- 1
+  
+  x$rownames <- as.numeric(row.names(x))
+  
+  # Assign all retweets a weighting equivalent to their retweet count
+  nz_rts <- subset(x,x$retweet_count > 0)$rownames
+  x[x$rownames %in% nz_rts,'weightings'] <- x[x$rownames %in% nz_rts,'retweet_count']
+  
+  # Assign additional tweet to all original tweets with a retweet_count > 0
+  or_twt <- subset(x,x$retweet_count > 0 & is.na(x$retweeted_user))$rownames
+  x[x$rownames %in% or_twt,'weightings'] <- x[x$rownames %in% or_twt,'retweet_count'] + 1
+  
+  # Remove rownames
+  x$rownames <- NULL
+  
+  # Return results
+  return(x)
+  
+}
+
+# Format countries
+uk_tweets    <- format_data(uk_tweets)
+usa_tweets   <- format_data(usa_tweets)
+spain_tweets <- format_data(spain_tweets)
+italy_tweets <- format_data(italy_tweets)
+grman_tweets <- format_data(grman_tweets)
+```
+
+```{r}
+# Function to remove unwanted duplicated tweets
+rm_dupl_rt <- function(x) {
+  # Extract original status_ids from all retweets
+  rsid <- x$retweeted_user %>% 
+    sapply(function(x) regmatches(x,regexec("'status_id': \\s*(.*?)\\s*, 'u", x))[[1]][2] ) %>%
+    unname() %>% as.numeric()
+  # Create vector or status id's of tweets in dataset
+  sid <- x$status_id
+  # if statment conditional on whether a retweer and it's original are present in the data
+  if (length(which(rsid %in% sid)) > 0) { # If retweet and original are present
+    x <- x[!c(1:nrow(x)) %in% which(rsid %in% sid),] # Remove retweets where original tweet has already been captured
+    x <- x[is.na(x$retweeted_user) | !duplicated(x$retweeted_user),] # Remove duplicate retweets
+  } else { # If orignal and retweet have not been captured
+    x <- x[is.na(x$retweeted_user) | !duplicated(x$retweeted_user),] # Remove duplicate retweets
+  }
+  # Return results
+  return(x)
+}
+
+# Function to remove unwanted duplications in the data (e.g. retweets when the orginal has been captured)
+rm_unwanted_dupl <- function(x) {
+  # Find tweets with duplicate text
+  dpls <- x[duplicated(x$VADER_text) | duplicated(x$VADER_text, fromLast = TRUE),] 
+  # Split into individual dataframes
+  dpls_split <- dpls %>% split(.$VADER_text) 
+  # Remove unwanted duplicates
+  dpls_usrnm <- lapply(dpls_split, function(y) rm_dupl_rt(y) ) 
+  # rbind dataframes back together then subset original dpls to only include tweets to be removed
+  dpls <- dpls[!dpls$status_id %in% do.call(rbind,dpls_usrnm)$status_id,] 
+  # Removed these unwanted tweets from original dataframe
+  x <- x[!x$status_id %in% dpls$status_id,]
+  return(x)
+}
+
+# Remove unwanted duplicates from the data
+uk_tweets    <- rm_unwanted_dupl(uk_tweets)
+usa_tweets   <- rm_unwanted_dupl(usa_tweets)
+```
+
+# Import tweet count data
+```{r}
+# Read in tweet counts
+uk_tweet_counts                    <- read_in_csv('tweet_counts/uk_tweet_counts_01122019_01052020.csv')
+#uk_tweet_counts_01112019_01052020  <- read_in_csv('tweet_counts/uk_tweet_counts_01122019_01052020.csv')
+#uk_tweet_counts_01052020_01112020  <- read_in_csv('tweet_counts/uk_tweet_counts_01052020_01112020.csv')
+#uk_tweet_counts  <- rbind(uk_tweet_counts_01112019_01052020, uk_tweet_counts_01052020_01112020)
+usa_tweet_counts                   <- read_in_csv('tweet_counts/usa_tweet_counts_01122019_01052020.csv')
+#usa_tweet_counts_01122019_01052020 <- read_in_csv('tweet_counts/usa_tweet_counts_01122019_01052020.csv')
+#usa_tweet_counts_01052020_01112020 <- read_in_csv('tweet_counts/usa_tweet_counts_01052020_01112020.csv')
+#usa_tweet_counts <- rbind(usa_tweet_counts_01122019_01052020, usa_tweet_counts_01052020_01112020)
+spain_tweet_counts                 <- read_in_csv('tweet_counts/spain_tweet_counts_01122019_01052020.csv')
+italy_tweet_counts                 <- read_in_csv('tweet_counts/italy_tweet_counts_01122019_01052020.csv')
+grman_tweet_counts                 <- read_in_csv('tweet_counts/grman_tweet_counts_01122019_01052020.csv')
+```
+
+# Format tweet count data
+```{r}
+assign_date <- function(x) {
+  
+  # Split string character date
+  date_df <- x$date %>% 
+    str_split(" ", simplify = TRUE) %>% 
+    as.data.frame()
+  
+  # Create date variable
+  x$date <- ymd(date_df$V1)
+  
+  # Group by date
+  x <- x %>% 
+    group_by(date) %>% 
+    dplyr::summarize(
+      count = sum(total_tweets)
+      )
+  
+  #y <- data.frame(date=rep(NA,336-nrow(x)),count=rep(NA,336-nrow(x)))
+  #x <- rbind(x,y)
+  
+}
+
+uk_daily_tweet_counts    <- assign_date(uk_tweet_counts)
+usa_daily_tweet_counts   <- assign_date(usa_tweet_counts)
+spain_daily_tweet_counts <- assign_date(spain_tweet_counts)
+italy_daily_tweet_counts <- assign_date(italy_tweet_counts)
+grman_daily_tweet_counts <- assign_date(grman_tweet_counts)
+```
+
+# Format covid tweet count data
+```{r}
+get_covid_tweets <- function(x) {
+  x <- x %>%
+    group_by(date) %>%
+    dplyr::summarise(covid_tweet_count = sum(cvd_twt))
+  
+  #y <- data.frame(date=rep(NA,336-nrow(x)),covid_tweet_count=rep(NA,336-nrow(x)))
+  #x <- rbind(x,y)
+}
+
+uk_covid_tweet_counts    <- get_covid_tweets(uk_tweets)
+usa_covid_tweet_counts   <- get_covid_tweets(usa_tweets)
+spain_covid_tweet_counts <- get_covid_tweets(spain_tweets)
+italy_covid_tweet_counts <- get_covid_tweets(italy_tweets)
+grman_covid_tweet_counts <- get_covid_tweets(grman_tweets)
+
+daily_covid_tweet_counts <- cbind(uk_covid_tweet_counts, usa_covid_tweet_counts[,2], 
+                                  spain_covid_tweet_counts[,2], italy_covid_tweet_counts[,2], 
+                                  grman_covid_tweet_counts[,2])
+names(daily_covid_tweet_counts) <- c('date','uk_count','usa_count','spain_count','italy_count','grman_count')
+```
+
+```{r}
+daily_tweet_counts <- cbind(uk_daily_tweet_counts,        uk_covid_tweet_counts[,2], 
+                            usa_daily_tweet_counts[,2],   usa_covid_tweet_counts[,2],
+                            spain_daily_tweet_counts[,2], spain_covid_tweet_counts[,2],
+                            italy_daily_tweet_counts[,2], italy_covid_tweet_counts[,2],
+                            grman_daily_tweet_counts[,2],  grman_covid_tweet_counts[,2])
+names(daily_tweet_counts) <- c('date',
+                               'uk_total_count',   'uk_covid_count',
+                               'usa_total_count',  'usa_covid_count',
+                               'spain_total_count','spain_covid_count',
+                               'italy_total_count','italy_covid_count',
+                               'grman_total_count','grman_covid_count')
+```
+
+# Plot results
+```{r, fig.width=14, fig.height=12}
+# Function to format y-axis
+ks <- function (x) { number_format(accuracy = 1,
+                                   scale = 1/1000,
+                                   suffix = "k",
+                                   big.mark = ",")(x) }
+
+# Function to plot tweet counts
+plot_tweet_count <- function(df,var,yvar,clr,title,y_format="ks",lab="-") {
+  p <- ggplot(df) + 
+    geom_line(aes_string(y=var, x='date'), stat="identity", size = 1.25, color = clr) +  
+    theme_tufte() + 
+    theme(text = element_text(family="robotocondensed",
+                              size = 50),
+          plot.margin = unit(c(0,0.25,0.5,0), 'cm')) +
+    ggtitle(title)
+  if (lab == "y") {
+    p <- p + theme(axis.title.x=element_blank()) + labs(y = paste0(yvar,' Tweet Count'))
+  } else {
+    p <- p + theme(axis.title.x=element_blank(), axis.title.y=element_blank())
+  }
+  if (y_format == "ks") {
+    p <- p +  scale_y_continuous(labels = ks)
+  } else {
+    p <- p
+  }
+}
+
+# Plot total tweet counts
+uk_tc_plot    <- plot_tweet_count(daily_tweet_counts[1:152,],'uk_total_count','Total','#386CB0','United Kingdom\na.')
+usa_tc_plot   <- plot_tweet_count(daily_tweet_counts[1:152,],'usa_total_count','Total','#386CB0','United States\na.') 
+spain_tc_plot <- plot_tweet_count(daily_tweet_counts[1:152,],'spain_total_count','Total','#386CB0','Spain\na.') 
+italy_tc_plot <- plot_tweet_count(daily_tweet_counts[1:152,],'italy_total_count','Total','#386CB0','Italy\na.')
+grman_tc_plot <- plot_tweet_count(daily_tweet_counts[1:152,],'grman_total_count','Total','#386CB0','Germany\na.',lab='y')
+
+#uk_tc_plot_2  <- plot_tweet_count(daily_tweet_counts,'uk_total_count','Total','#386CB0','a.') 
+#usa_tc_plot_2 <- plot_tweet_count(daily_tweet_counts,'usa_total_count','Total','#386CB0','a.') 
+
+# Plot covid tweet counts
+uk_cc_plot    <- plot_tweet_count(daily_tweet_counts[1:152,],'uk_covid_count','Covid','#EF3B2C','b.',y_format='nm')
+usa_cc_plot   <- plot_tweet_count(daily_tweet_counts[1:152,],'usa_covid_count','Covid','#EF3B2C','b.',y_format='nm') 
+spain_cc_plot <- plot_tweet_count(daily_tweet_counts[1:152,],'spain_covid_count','Covid','#EF3B2C','b.',y_format='nm') 
+italy_cc_plot <- plot_tweet_count(daily_tweet_counts[1:152,],'italy_covid_count','Covid','#EF3B2C','b.',y_format='nm') 
+grman_cc_plot <- plot_tweet_count(daily_tweet_counts[1:152,],'grman_covid_count','Covid','#EF3B2C','b.',y_format='nm',lab='y')
+
+#uk_cc_plot_2  <- plot_tweet_count(daily_tweet_counts,'uk_covid_count','Covid','#EF3B2C','b.') 
+#usa_cc_plot_2 <- plot_tweet_count(daily_tweet_counts,'usa_covid_count','Covid','#EF3B2C','b.') 
+```
+
+```{r}
+# Import data for covid plots
+
+# Function to read in data
+read_in_csv <- function(x) {
+  x <- suppressWarnings(suppressMessages(read_csv(paste0(rp,'data/covid/',x))))
+  x$X1 <- NULL
+  return(x)
+}
+
+# covid data
+case_data <- read_in_csv('owid-covid-data.csv')
+
+# countries by first confirmed case
+ctry_rank <- read_in_csv("date_ctry_fcase.csv")
+```
+
+```{r}
+# countries to be selected
+cntry <- c("Germany", 
+           "Italy",
+           "Spain",
+           "United Kingdom",
+           "United States")
+
+# change to date format
+case_data$date <- as.Date(case_data$date)
+
+# filter countries & cases up to May 1st
+grman_case_data <- case_data %>% dplyr::filter(location %in% "Germany",        date <= as.Date("2020-05-01") )
+italy_case_data <- case_data %>% dplyr::filter(location %in% "Italy",          date <= as.Date("2020-05-01") )
+spain_case_data <- case_data %>% dplyr::filter(location %in% "Spain",          date <= as.Date("2020-05-01") )
+uk_case_data    <- case_data %>% dplyr::filter(location %in% "United Kingdom", date <= as.Date("2020-05-01") )
+usa_case_data   <- case_data %>% dplyr::filter(location %in% "United States",  date <= as.Date("2020-05-01") )
+```
+
+```{r}
+# value to create secondary axis - how many times is the max value of axis 2 than axis 1 
+# eg. if the max value of axis 2 is 100 and axis 1 10, then 10 is the number
+# max val: new_cases_per_million = 196.365 - stringency_index = 93.52 -> 93.52 / 196.365
+wgt <- 0.476256
+
+# individual countries
+plot_covid_rules <- function(df,title,lab="-") {
+  p <- ggplot(df) + 
+    geom_smooth( aes( x = date, y = new_cases_per_million), method = 'loess', se = FALSE, color = "#440154FF", size = 1.25, span = 0.1, show.legend = TRUE) +
+    geom_smooth( aes( x = date, y = stringency_index / wgt), method = 'loess', se = FALSE, color = "#FDE725FF", size = 1.25, span = 0.1, show.legend = TRUE) +
+    #scale_y_continuous(sec.axis = sec_axis(trans=~.*wgt, 
+    #                                       name="Stringency Index")) +
+    scale_x_date(limits = c(as.Date('2019-12-01'),as.Date('2020-05-01'))) +
+    theme_classic() +
+    theme(text = element_text(family="robotocondensed", size = 50),
+          strip.background = element_rect(colour = "white", fill = "white"),
+          legend.title = element_text(size = 50, color = "black"), 
+          legend.position = "bottom",
+          legend.box = "horizontal") +
+    ggtitle(title)
+  
+  if (lab == "y1") {
+    p <- p + xlab("Date") + ylab("Number of cases (purple)") + theme(plot.margin = unit(c(0,0,0,0), 'cm')) +
+             scale_y_continuous(sec.axis = sec_axis(trans=~.*wgt, name=""))
+  } else if (lab == "y2") {
+    p <- p + xlab("Date") + ylab("") + theme(plot.margin = unit(c(0,0,0,0), 'cm')) +
+             scale_y_continuous(sec.axis = sec_axis(trans=~.*wgt, name="Stringency Index"))
+  } else if (lab == "mid") {
+    p <- p + xlab("Date") + theme(axis.title.y=element_blank()) + theme(plot.margin = unit(c(0,1.5,0.25,1.25), 'cm')) +
+             scale_y_continuous(sec.axis = sec_axis(trans=~.*wgt, name=""))
+  } else {
+    p <- p + xlab("Date") + theme(axis.title.y=element_blank()) + theme(plot.margin = unit(c(0,0,0,0), 'cm')) +
+             scale_y_continuous(sec.axis = sec_axis(trans=~.*wgt, name=""))
+  }
+}
+
+# Plot individial countries
+grman_cr <- plot_covid_rules(grman_case_data,'c.',lab="y1")
+italy_cr <- plot_covid_rules(italy_case_data,'c.')
+spain_cr <- plot_covid_rules(spain_case_data,'c.',lab="mid")
+uk_cr    <- plot_covid_rules(uk_case_data,   'c.')
+usa_cr   <- plot_covid_rules(usa_case_data,  'c.',lab="y2")
+```
+
+
+```{r, fig.width=14}
+grman_plot <- grman_tc_plot / grman_cc_plot / grman_cr
+italy_plot <- italy_tc_plot / italy_cc_plot / italy_cr
+spain_plot <- spain_tc_plot / spain_cc_plot / spain_cr
+uk_plot    <- uk_tc_plot    / uk_cc_plot    / uk_cr
+usa_plot   <- usa_tc_plot   / usa_cc_plot   / usa_cr
+
+grman_plot | italy_plot | spain_plot | uk_plot | usa_plot
+```
+
+
+
+Save plots
+```{r}
+png(paste0(rp,"outputs/covid&tweet_counts.png"), units="in", width=20, height=12, res=300)
+grman_plot | italy_plot | spain_plot | uk_plot | usa_plot
+dev.off()
+```
+
+## Code for selecting colour pallettes
+```{r}
+# Hexadecimal color specification 
+brewer.pal(n = 12, name = "Reds")
+```
+
+```{r}
+# View a single RColorBrewer palette by specifying its name
+display.brewer.pal(n = 12, name = 'Reds')
+```
+
+```{r, fig.height=7}
+display.brewer.all()
+```
