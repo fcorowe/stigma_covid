@@ -41,5 +41,7 @@ If you use the code and/or data in this repository, we would appreciate if you c
 }
 ```
 
+The repository is also registered on the [Open Science Framework](osf.io/84jwv)
+
 [Data](.\data)
 
