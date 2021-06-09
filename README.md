@@ -44,3 +44,7 @@ The repository is also registered on the [Open Science Framework](https://doi.or
 
 [Data](.\data)
 
+## Open Data Product
+
+
+![Key topics underpinning migration sentiment during COVID-19](./outputs/daily_topics_perc_12_pn_exp.png)
