@@ -1,0 +1,176 @@
+---
+title: "Robusness Analysis"
+author: "F Rowe, M Mahony"
+---
+
+# Library necessary packages
+```{r}
+library(tidyverse)
+library(dplyr)
+library(ggthemes)
+library(vader)
+library(patchwork)
+library(showtext)
+library(viridis)
+library(scales)
+library(sjPlot)
+```
+# Setting Data Visualisation Parameters
+
+## Set font style
+```{r}
+# load font
+font_add_google("Roboto Condensed", "robotocondensed")
+# automatically use showtext to render text
+showtext_auto()
+```
+
+## Setting ggplot theme
+```{r}
+set_theme(
+  base = theme_tufte(),
+  theme.font = "robotocondensed",
+  title.size = 2.4,
+  axis.textsize = 1.3,
+  axis.title.size = 1.3,
+  axis.textsize.x = 1.2,
+  axis.textsize.y = 1.2,
+  axis.linecolor.x = "grey50",
+  axis.line.size = 0.2,
+  #geom.alpha = 0.5
+)
+```
+
+# Reading data
+
+## Setting directories
+```{r, results='hide', message=FALSE, warning=FALSE}
+rm(list=ls())
+rp <- "/Users/Franciscorowe 1/Dropbox/Francisco/Research/in_progress/dp_paper/github/stigma_covid/"
+tp <- "data/robuness_test/"
+```
+
+## Reading UK data
+```{r}
+uk_df <- readRDS(paste0(rp,tp, "uk_all_tweets_01032020_08032020_vs.RData")) %>% filter(day < as.Date("2020-04-01"))
+  
+str(uk_df)
+```
+
+## Reading US data
+```{r}
+us_df <- readRDS(paste0(rp,tp, "usa_all_tweets_01032020_08032020_vs.RData")) %>% filter(day < as.Date("2020-04-01"))
+  
+str(us_df)
+```
+
+
+# Plotting
+
+## Max Hour Tweets vs Full Day
+
+### UK
+```{r}
+p_uk <- ggplot(data = uk_df) + 
+  geom_smooth(aes( x = day, y = VADER_compound, colour="Full day"), 
+              se = T, 
+              span = 0.1, 
+              show.legend = T,
+              level = 0.99,
+              #color="#FDE725FF",
+              size = 2) +
+   geom_smooth(data = filter(uk_df, max_hour == 1), 
+               aes( x = day, y = VADER_compound, colour="Peak hour"), 
+               se = T, 
+               span = 0.1, 
+               show.legend = T, 
+               #color="#440154FF",
+               level = 0.99,
+               size = 2) +
+  labs(title = "United Kingdom",
+       x= " ",
+       y = "Tweet sentiment score") +
+  theme(legend.position="bottom") +
+  theme(axis.title = element_text(size = 22)) +
+  scale_y_continuous(limits = c(-1, 1)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", size = .3) +
+  scale_colour_manual(name="Dataset", 
+                      values=c("#FDE725FF", "#440154FF"))
+  
+
+  
+```
+
+```{r}
+p_us <- ggplot(data = us_df) + 
+  geom_smooth(aes( x = day, y = VADER_compound, colour="Full day"), 
+              se = T, 
+              span = 0.1, 
+              show.legend = T,
+              level = 0.99,
+              #color="#FDE725FF",
+              size = 2) +
+   geom_smooth(data = filter(us_df, max_hour == 1), 
+               aes( x = day, y = VADER_compound, colour="Peak hour"), 
+               se = T, 
+               span = 0.1, 
+               show.legend = T, 
+               #color="#440154FF",
+               level = 0.99,
+               size = 2) +
+  labs(title = "United States",
+       x= "Day",
+       y = "Tweet sentiment score") +
+  theme(legend.position="bottom") +
+    theme(axis.title = element_text(size = 22)) +
+  scale_y_continuous(limits = c(-1, 1)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", size = .3) +
+  scale_colour_manual(name="Dataset", 
+                      values=c("#FDE725FF", "#440154FF"))
+
+
+png(paste0(rp, "outputs/robustness_test.png"), units="in", width=10, height=15, res=300)
+co <- p_uk / p_us & theme(legend.title = element_text(size = 18), 
+                          legend.position = "bottom", 
+                          legend.text = element_text(size = 18)) 
+co + plot_layout(guides = "collect")
+dev.off()
+```
+
+
+# Compute Correlation by Day
+```{r}
+uk_df %>%
+  group_by(day) %>%
+  summarize( Correlation = cor(VADER_compound, VADER_compound*max_hour)) %>% 
+  ggplot(.) + 
+  geom_smooth(aes( x = day, y = Correlation, colour = "Correlation"), 
+              se = T, 
+              span = 0.1, 
+              show.legend = T,
+              level = 0.99,
+              #color="#FDE725FF",
+              size = 2) +
+    scale_colour_manual(name=" ", 
+                      values=c("#453781FF")) +
+  scale_y_continuous(limits = c(-1, 1))
+```
+
+# Compute Correlation by Week
+```{r}
+uk_df$week <- strftime(uk_df$day, format="%W")
+
+uk_df %>%
+  group_by(week) %>%
+  summarize( Correlation = cor(VADER_compound, VADER_compound*max_hour)) %>% 
+  ggplot(., aes( x = week, y = Correlation, group=1)) + 
+  geom_point() +
+  geom_line() +
+      scale_colour_manual(name=" ", 
+                      values=c("#453781FF")) +
+  scale_y_continuous(limits = c(-1, 1))
+
+```
+
+
+
