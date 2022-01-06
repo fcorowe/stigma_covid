@@ -43,6 +43,6 @@ The repository is also registered on the [Open Science Framework](https://doi.or
 
 ## Open Data Product
 
-This repository also include an open data product identifying the key topic associated with immigration sentiment during early stages of the pandemic. The data set contains daily tweets and an identifier classifying each tweet into a relevant topic. Details provided in an upcoming paper in review in [Data & Policy](https://www.cambridge.org/core/journals/data-and-policy).
+This repository also include an open data product identifying the key topic associated with immigration sentiment during early stages of the pandemic. The data set contains daily tweets and an identifier classifying each tweet into a relevant topic.
 
 ![Key topics underpinning migration sentiment during COVID-19](./outputs/daily_topics_perc_12_pn_exp.png)
