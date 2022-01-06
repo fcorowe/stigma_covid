@@ -5,7 +5,7 @@
 
 <sup>1</sup> *Geographic Data Science Lab, University of Liverpool, Liverpool, United Kingdom*
 
-<sup>2</sup> *Barcelona Supercomputing Center, Barcelona, Spain*
+<sup>2</sup> *Data Science Institute, Universidad del Desarrollo, Santiago, Chile*
 
 <sup>3</sup> *Global Migration Data Analysis Centre (GMDAC), International Organization for Migration, Berlin, Germany*
 
@@ -24,19 +24,16 @@ This paper aims to measure and monitor changes in attitudes towards immigrants d
 
 ## Citation
 
-If you use the code and/or data in this repository, we would appreciate if you could cite the pre-print paper as:
+If you use the code and/or data in this repository, we would appreciate if you could cite our paper:
 
 ```
-@article{rowe_et_al2021dp,
-  title={Using Twitter to Track Immigration Sentiment During Early Stages of the COVID-19 Pandemic},
-  author={Rowe, Francisco and 
-          Mahony, Michael and 
-          Graells-Garrido, Eduardo and
-          Rango, Marzia and
-          Sievers, Niklas},
-  journal={arXiv preprint arXiv:xxx},
-  DOI={xxx}
+@article{rowe2021using,
+  title={Using Twitter to track immigration sentiment during early stages of the COVID-19 pandemic},
+  author={Rowe, Francisco and Mahony, Michael and Graells-Garrido, Eduardo and Rango, Marzia and Sievers, Niklas},
+  journal={Data \& Policy},
+  volume={3},
   year={2021},
+  publisher={Cambridge University Press}
 }
 ```
 
